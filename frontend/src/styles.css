@@ -1,0 +1,111 @@
+:root {
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --line: #e7ecf3;
+  --text: #1f2a37;
+  --sub: #64748b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.layout-root {
+  height: 100vh;
+}
+
+.layout-aside {
+  background: #0f172a;
+  color: #fff;
+}
+
+.brand {
+  padding: 18px 14px;
+  font-size: 17px;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.menu-panel {
+  border-right: none;
+  background: transparent;
+}
+
+.menu-panel .el-menu-item {
+  color: #d4d9e5;
+}
+
+.menu-panel .el-menu-item.is-active {
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.14);
+}
+
+.layout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.header-left {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.role-tag {
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.layout-main {
+  padding: 16px;
+}
+
+.card-title {
+  font-weight: 700;
+}
+
+.text-muted {
+  color: var(--sub);
+}
+
+.login-page {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: linear-gradient(135deg, #e2e8f0, #f8fafc);
+}
+
+.login-card {
+  width: 460px;
+  max-width: 100%;
+}
+
+.login-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.account-tip {
+  color: var(--sub);
+  line-height: 1.7;
+}
+
+.json-box {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px;
+  border-radius: 6px;
+  overflow: auto;
+}

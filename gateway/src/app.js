@@ -1,0 +1,206 @@
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+const { Gateway, Wallets } = require("fabric-network");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const CHANNEL_NAME = process.env.CHANNEL_NAME || "medicalchannel";
+const CHAINCODE_NAME = process.env.CHAINCODE_NAME || "medshare";
+const DISCOVERY_AS_LOCALHOST =
+  (process.env.FABRIC_DISCOVERY_AS_LOCALHOST || "true").toLowerCase() === "true";
+
+const orgConfigs = {
+  org1: {
+    mspId: process.env.FABRIC_ORG1_MSPID || "Org1MSP",
+    ccpPath:
+      process.env.FABRIC_ORG1_CCP ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/connection-org1.json",
+    certPath:
+      process.env.FABRIC_ORG1_CERT ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/signcerts/cert.pem",
+    keyDir:
+      process.env.FABRIC_ORG1_KEY_DIR ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/keystore"
+  },
+  org2: {
+    mspId: process.env.FABRIC_ORG2_MSPID || "Org2MSP",
+    ccpPath:
+      process.env.FABRIC_ORG2_CCP ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org2.example.com/connection-org2.json",
+    certPath:
+      process.env.FABRIC_ORG2_CERT ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp/signcerts/cert.pem",
+    keyDir:
+      process.env.FABRIC_ORG2_KEY_DIR ||
+      "/fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp/keystore"
+  }
+};
+
+function normalizeOrg(org) {
+  if (!org) return "org1";
+  const value = String(org).trim().toLowerCase();
+  return value === "org2" ? "org2" : "org1";
+}
+
+function readFirstKeyFile(keyDir) {
+  const files = fs.readdirSync(keyDir).filter((name) => !name.startsWith("."));
+  if (!files.length) {
+    throw new Error(`No key file found in ${keyDir}`);
+  }
+  return path.join(keyDir, files[0]);
+}
+
+function parseResult(buffer) {
+  if (!buffer) return null;
+  const text = buffer.toString("utf8");
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    return text;
+  }
+}
+
+async function withContract(org, action) {
+  const config = orgConfigs[normalizeOrg(org)];
+  const ccp = JSON.parse(fs.readFileSync(config.ccpPath, "utf8"));
+  const cert = fs.readFileSync(config.certPath, "utf8");
+  const keyPath = readFirstKeyFile(config.keyDir);
+  const privateKey = fs.readFileSync(keyPath, "utf8");
+
+  const wallet = await Wallets.newInMemoryWallet();
+  await wallet.put("appUser", {
+    credentials: { certificate: cert, privateKey },
+    mspId: config.mspId,
+    type: "X.509"
+  });
+
+  const gateway = new Gateway();
+  try {
+    await gateway.connect(ccp, {
+      wallet,
+      identity: "appUser",
+      discovery: { enabled: true, asLocalhost: DISCOVERY_AS_LOCALHOST }
+    });
+    const network = await gateway.getNetwork(CHANNEL_NAME);
+    const contract = network.getContract(CHAINCODE_NAME);
+    return await action(contract);
+  } finally {
+    gateway.disconnect();
+  }
+}
+
+async function submit(org, fnName, args) {
+  return withContract(org, async (contract) => {
+    const tx = contract.createTransaction(fnName);
+    const result = await tx.submit(...args);
+    return { txId: tx.getTransactionId(), result: parseResult(result) };
+  });
+}
+
+async function evaluate(org, fnName, args) {
+  return withContract(org, async (contract) => {
+    const result = await contract.evaluateTransaction(fnName, ...args);
+    return { result: parseResult(result) };
+  });
+}
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.post("/api/records/evidence", async (req, res) => {
+  const { org, recordId, patientId, uploaderHospital, dataHash, createdAt } = req.body;
+  if (!recordId || !patientId || !uploaderHospital || !dataHash || !createdAt) {
+    return res.status(400).json({ message: "missing required fields" });
+  }
+  try {
+    const result = await submit(org, "CreateMedicalRecordEvidence", [
+      String(recordId),
+      String(patientId),
+      String(uploaderHospital),
+      String(dataHash),
+      String(createdAt)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/records/evidence/:recordId", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "GetMedicalRecordEvidence", [String(req.params.recordId)]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/access-requests", async (req, res) => {
+  const { org, requestId, recordId, applicantHospital, reasonHash, status, createdAt } = req.body;
+  if (!requestId || !recordId || !applicantHospital || !reasonHash || !createdAt) {
+    return res.status(400).json({ message: "missing required fields" });
+  }
+  try {
+    const result = await submit(org, "CreateAccessRequest", [
+      String(requestId),
+      String(recordId),
+      String(applicantHospital),
+      String(reasonHash),
+      String(status || "PENDING"),
+      String(createdAt)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/access-requests/:requestId/approve", async (req, res) => {
+  const org = req.body.org || "org1";
+  const reviewedAt = req.body.reviewedAt || new Date().toISOString();
+  try {
+    const result = await submit(org, "ApproveAccessRequest", [
+      String(req.params.requestId),
+      String(reviewedAt)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/access-requests/:requestId/reject", async (req, res) => {
+  const org = req.body.org || "org1";
+  const reviewedAt = req.body.reviewedAt || new Date().toISOString();
+  try {
+    const result = await submit(org, "RejectAccessRequest", [
+      String(req.params.requestId),
+      String(reviewedAt)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/access-requests/:requestId", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "QueryAccessRequest", [String(req.params.requestId)]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Gateway listening on :${PORT}`);
+});

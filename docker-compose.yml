@@ -1,0 +1,90 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: medshare-mysql
+    restart: unless-stopped
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: medshare
+      MYSQL_USER: medshare
+      MYSQL_PASSWORD: medshare123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  fabric-bootstrap:
+    image: docker:27-cli
+    container_name: medshare-fabric-bootstrap
+    profiles: ["fabric-init"]
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >
+      sh -c "
+      apk add --no-cache bash git curl libc6-compat gcompat &&
+      bash /workspace/fabric-network/scripts/bootstrap.sh
+      "
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: medshare-gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      CHANNEL_NAME: medicalchannel
+      CHAINCODE_NAME: medshare
+      FABRIC_DISCOVERY_AS_LOCALHOST: "false"
+    volumes:
+      - ./fabric-network:/fabric-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "peer0.org1.example.com:host-gateway"
+      - "peer0.org2.example.com:host-gateway"
+      - "orderer.example.com:host-gateway"
+  backend:
+    build:
+      context: ./backend
+    container_name: medshare-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://medshare:medshare123@mysql:3306/medshare?charset=utf8mb4
+      GATEWAY_URL: http://gateway:3000/api
+      SECRET_KEY: medshare-demo-secret
+      ACCESS_TOKEN_EXPIRE_MINUTES: 720
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000/api
+    container_name: medshare-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  mysql-data:
