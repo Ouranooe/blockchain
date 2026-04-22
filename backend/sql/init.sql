@@ -8,8 +8,17 @@ CREATE TABLE IF NOT EXISTS users (
   role VARCHAR(32) NOT NULL,
   real_name VARCHAR(64) NOT NULL,
   hospital_name VARCHAR(64) NULL,
+  msp_org VARCHAR(32) NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 迭代 1 新增 users.msp_org / users.is_active 两列。本文件仅在首次建库执行。
+-- 若升级旧库（已有数据），请手动执行：
+--   ALTER TABLE users ADD COLUMN msp_org VARCHAR(32) NULL;
+--   ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1;
+--   UPDATE users SET msp_org='Org1MSP' WHERE username='hospital_a';
+--   UPDATE users SET msp_org='Org2MSP' WHERE username='hospital_b';
 
 CREATE TABLE IF NOT EXISTS medical_records (
   id INT PRIMARY KEY AUTO_INCREMENT,
@@ -42,12 +51,13 @@ CREATE TABLE IF NOT EXISTS access_requests (
   CONSTRAINT fk_request_patient FOREIGN KEY (patient_id) REFERENCES users(id)
 );
 
-INSERT INTO users (id, username, password, role, real_name, hospital_name) VALUES
-  (1, 'admin', '123456', 'admin', '系统管理员', NULL),
-  (2, 'patient1', '123456', 'patient', '张三', NULL),
-  (3, 'patient2', '123456', 'patient', '李四', NULL),
-  (4, 'hospital_a', '123456', 'hospital', 'HospitalA医生', 'HospitalA'),
-  (5, 'hospital_b', '123456', 'hospital', 'HospitalB医生', 'HospitalB')
+-- 注：初始种子密码仍为明文 '123456'，首次成功登录时后端会自动替换为 bcrypt 哈希
+INSERT INTO users (id, username, password, role, real_name, hospital_name, msp_org, is_active) VALUES
+  (1, 'admin',      '123456', 'admin',    '系统管理员',   NULL,        NULL,      1),
+  (2, 'patient1',   '123456', 'patient',  '张三',         NULL,        NULL,      1),
+  (3, 'patient2',   '123456', 'patient',  '李四',         NULL,        NULL,      1),
+  (4, 'hospital_a', '123456', 'hospital', 'HospitalA医生','HospitalA', 'Org1MSP', 1),
+  (5, 'hospital_b', '123456', 'hospital', 'HospitalB医生','HospitalB', 'Org2MSP', 1)
 ON DUPLICATE KEY UPDATE username = VALUES(username);
 
 INSERT INTO medical_records (

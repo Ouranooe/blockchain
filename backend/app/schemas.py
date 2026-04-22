@@ -17,11 +17,29 @@ class UserInfo(BaseModel):
     role: str
     real_name: str
     hospital_name: Optional[str] = None
+    msp_org: Optional[str] = None
+    is_active: bool = True
 
 
 class LoginResponse(BaseModel):
     token: str
     user: UserInfo
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_]+$")
+    password: str = Field(min_length=6, max_length=64)
+    real_name: str = Field(min_length=1, max_length=64)
+    role: str = Field(default="patient")  # 自助注册目前仅允许 patient
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=6, max_length=64)
+
+
+class SimpleMessage(BaseModel):
+    detail: str
 
 
 class MedicalRecordCreate(BaseModel):

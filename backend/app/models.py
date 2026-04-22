@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, func
 
 from .database import Base
 
@@ -12,6 +12,10 @@ class User(Base):
     role = Column(String(32), nullable=False, index=True)
     real_name = Column(String(64), nullable=False)
     hospital_name = Column(String(64), nullable=True)
+    # 迭代 1 新增：MSP 组织标识（Org1MSP/Org2MSP），用于链上身份映射
+    msp_org = Column(String(32), nullable=True)
+    # 迭代 1 新增：账号启用标记，支持管理员禁用
+    is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 

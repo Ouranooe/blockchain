@@ -23,12 +23,16 @@ from .schemas import (
     AccessRequestItem,
     AccessRequestReview,
     AuditEvent,
+    ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
     MedicalRecordCreate,
     MedicalRecordItem,
+    RegisterRequest,
+    SimpleMessage,
     UserInfo,
 )
+from .security import hash_password, is_hashed, verify_password
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -130,17 +134,66 @@ def health_check():
 
 @app.post(f"{settings.API_PREFIX}/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = (
-        db.query(User)
-        .filter(User.username == payload.username, User.password == payload.password)
-        .first()
-    )
-    if not user:
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not verify_password(payload.password, user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误"
         )
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已禁用")
+
+    # 迭代 1：种子用户的历史明文密码首次成功登录后自动迁移为 bcrypt 哈希
+    if not is_hashed(user.password):
+        user.password = hash_password(payload.password)
+        db.commit()
+
     token = create_access_token(user)
     return {"token": token, "user": user}
+
+
+@app.post(f"{settings.API_PREFIX}/auth/register", response_model=UserInfo)
+def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    # 自助注册目前仅开放患者角色；医院/管理员由管理员线下创建
+    if payload.role != "patient":
+        raise HTTPException(status_code=400, detail="自助注册仅支持 patient 角色")
+    existing = db.query(User).filter(User.username == payload.username).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="用户名已被占用")
+
+    user = User(
+        username=payload.username,
+        password=hash_password(payload.password),
+        role=payload.role,
+        real_name=payload.real_name,
+        hospital_name=None,
+        msp_org=None,
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post(f"{settings.API_PREFIX}/auth/change-password", response_model=SimpleMessage)
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(payload.old_password, current_user.password):
+        raise HTTPException(status_code=400, detail="原密码不正确")
+    if payload.old_password == payload.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与原密码相同")
+
+    current_user.password = hash_password(payload.new_password)
+    db.commit()
+    return {"detail": "密码已更新"}
+
+
+@app.get(f"{settings.API_PREFIX}/auth/me", response_model=UserInfo)
+def whoami(current_user: User = Depends(get_current_user)):
+    return current_user
 
 
 @app.get(f"{settings.API_PREFIX}/users/patients", response_model=List[UserInfo])
