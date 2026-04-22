@@ -32,6 +32,10 @@ class MedicalRecord(Base):
     content = Column(Text, nullable=False)
     content_hash = Column(String(64), nullable=False, index=True)
     tx_id = Column(String(128), nullable=True)
+    # 迭代 2 新增：版本链，DB 只保留当前版本，历史版本从链上查
+    version = Column(Integer, nullable=False, default=1)
+    previous_tx_id = Column(String(128), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 

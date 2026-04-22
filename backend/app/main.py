@@ -15,7 +15,9 @@ from .gateway import (
     create_access_request,
     create_record_evidence,
     query_access_request,
+    query_record_version,
     reject_access_request,
+    revise_record_evidence,
 )
 from .models import AccessRequest, MedicalRecord, User
 from .schemas import (
@@ -28,6 +30,9 @@ from .schemas import (
     LoginResponse,
     MedicalRecordCreate,
     MedicalRecordItem,
+    MedicalRecordRevise,
+    RecordHistory,
+    RecordVersionItem,
     RegisterRequest,
     SimpleMessage,
     UserInfo,
@@ -69,6 +74,9 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
         diagnosis=record.diagnosis,
         content_hash=record.content_hash,
         tx_id=record.tx_id,
+        version=record.version or 1,
+        previous_tx_id=record.previous_tx_id,
+        updated_at=record.updated_at,
         created_at=record.created_at,
         can_view_content=can_view,
         content=record.content if can_view else None,
@@ -293,6 +301,8 @@ def create_record(
         diagnosis=payload.diagnosis,
         content=payload.content,
         content_hash=content_hash,
+        version=1,
+        previous_tx_id=None,
     )
     db.add(record)
     db.flush()
@@ -556,3 +566,118 @@ def access_request_chain_status(
         return query_access_request(request_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------- 迭代 2：病历版本链 ----------------
+
+
+@app.post(
+    f"{settings.API_PREFIX}/records/{{record_id}}/revise",
+    response_model=MedicalRecordItem,
+)
+def revise_record(
+    record_id: int,
+    payload: MedicalRecordRevise,
+    current_user: User = Depends(require_role("hospital")),
+    db: Session = Depends(get_db),
+):
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+    if record.uploader_hospital_id != current_user.id:
+        raise HTTPException(status_code=403, detail="仅原上传医院可修订该病历")
+
+    new_hash = hashlib.sha256(payload.content.encode("utf-8")).hexdigest()
+    if new_hash == record.content_hash and (
+        payload.diagnosis is None or payload.diagnosis == record.diagnosis
+    ):
+        raise HTTPException(status_code=400, detail="内容未发生变更")
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    try:
+        chain_result = revise_record_evidence(
+            hospital_name=current_user.hospital_name or current_user.username,
+            record_id=record.id,
+            new_data_hash=new_hash,
+            updated_at=now_iso,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    previous_tx = record.tx_id
+    record.content = payload.content
+    record.content_hash = new_hash
+    if payload.diagnosis is not None:
+        record.diagnosis = payload.diagnosis
+    record.version = (record.version or 1) + 1
+    record.previous_tx_id = previous_tx
+    record.tx_id = chain_result.get("txId")
+    record.updated_at = now
+
+    db.commit()
+    db.refresh(record)
+    users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
+    return _record_to_item(record, users, True)
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/{{record_id}}/history",
+    response_model=RecordHistory,
+)
+def record_history(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+
+    # 权限：患者本人、上传医院、已获授权的医院、管理员
+    authorized = False
+    if current_user.role == "admin":
+        authorized = True
+    elif current_user.role == "patient" and record.patient_id == current_user.id:
+        authorized = True
+    elif current_user.role == "hospital":
+        if record.uploader_hospital_id == current_user.id:
+            authorized = True
+        else:
+            approved = (
+                db.query(AccessRequest)
+                .filter(
+                    AccessRequest.record_id == record_id,
+                    AccessRequest.applicant_hospital_id == current_user.id,
+                    AccessRequest.status == "APPROVED",
+                )
+                .first()
+            )
+            authorized = approved is not None
+    if not authorized:
+        raise HTTPException(status_code=403, detail="无权限查看该病历历史")
+
+    latest_version = record.version or 1
+    versions: List[RecordVersionItem] = []
+    try:
+        for v in range(1, latest_version + 1):
+            chain_payload = query_record_version(record_id, v)
+            data = chain_payload.get("result") if isinstance(chain_payload, dict) else None
+            if not isinstance(data, dict):
+                continue
+            versions.append(
+                RecordVersionItem(
+                    version=int(data.get("version", v)),
+                    data_hash=data.get("dataHash", ""),
+                    tx_id=data.get("txId", ""),
+                    previous_tx_id=data.get("previousTxId", "") or "",
+                    created_at=data.get("createdAt"),
+                    updated_at=data.get("updatedAt"),
+                )
+            )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return RecordHistory(
+        record_id=record_id, latest_version=latest_version, versions=versions
+    )

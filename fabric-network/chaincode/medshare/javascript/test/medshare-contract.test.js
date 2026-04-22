@@ -18,7 +18,7 @@ describe("MedShareContract", () => {
   });
 
   describe("CreateMedicalRecordEvidence", () => {
-    it("首次创建应写入世界状态并返回带 txId 的 JSON", async () => {
+    it("首次创建应写入 LATEST 与 v1 两个键，version=1 且 previousTxId 为空", async () => {
       const raw = await contract.CreateMedicalRecordEvidence(
         ctx,
         "1",
@@ -32,11 +32,15 @@ describe("MedShareContract", () => {
       expect(evidence.patientId).to.equal("2");
       expect(evidence.uploaderHospital).to.equal("HospitalA");
       expect(evidence.dataHash).to.equal("deadbeef");
+      expect(evidence.version).to.equal(1);
+      expect(evidence.previousTxId).to.equal("");
+      expect(evidence.createdAt).to.equal("2026-04-22T00:00:00Z");
+      expect(evidence.updatedAt).to.equal("2026-04-22T00:00:00Z");
       expect(evidence.txId).to.equal("tx-test-0001");
-      expect(evidence.docType).to.equal("RecordEvidence");
 
-      const stored = readState(ctx, "RECORD_1");
-      expect(stored).to.deep.equal(evidence);
+      // 双键写入：v1 和 LATEST 应一致
+      expect(readState(ctx, "RECORD_1_v1")).to.deep.equal(evidence);
+      expect(readState(ctx, "RECORD_LATEST_1")).to.deep.equal(evidence);
     });
 
     it("重复创建同一 recordId 应抛错", async () => {
@@ -51,14 +55,14 @@ describe("MedShareContract", () => {
     });
   });
 
-  describe("GetMedicalRecordEvidence", () => {
+  describe("GetMedicalRecordEvidence（向后兼容 -> LATEST）", () => {
     it("查询不存在的记录应抛错", async () => {
       await expect(
         contract.GetMedicalRecordEvidence(ctx, "999")
       ).to.be.rejectedWith(/not found/);
     });
 
-    it("能读到已创建的证据", async () => {
+    it("能读到已创建的最新版证据", async () => {
       await contract.CreateMedicalRecordEvidence(
         ctx, "1", "2", "HospitalA", "deadbeef", "2026-04-22T00:00:00Z"
       );
@@ -66,6 +70,116 @@ describe("MedShareContract", () => {
       const evidence = JSON.parse(raw);
       expect(evidence.recordId).to.equal("1");
       expect(evidence.dataHash).to.equal("deadbeef");
+      expect(evidence.version).to.equal(1);
+    });
+  });
+
+  describe("UpdateMedicalRecordEvidence（版本链）", () => {
+    beforeEach(async () => {
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "hash-v1", "2026-04-22T00:00:00Z"
+      );
+    });
+
+    it("首次修订应产生 v2，previousTxId 指向 v1 的 txId", async () => {
+      const ctx2 = makeMockContext({ txId: "tx-v2" });
+      // 把 ctx 的状态拷贝到 ctx2（模拟链持续累积）
+      for (const [k, v] of ctx.stub._state.entries()) {
+        ctx2.stub._state.set(k, Buffer.from(v));
+      }
+
+      const raw = await contract.UpdateMedicalRecordEvidence(
+        ctx2, "1", "hash-v2", "2026-04-22T10:00:00Z"
+      );
+      const ev = JSON.parse(raw);
+      expect(ev.version).to.equal(2);
+      expect(ev.previousTxId).to.equal("tx-test-0001"); // v1 的 txId
+      expect(ev.dataHash).to.equal("hash-v2");
+      expect(ev.createdAt).to.equal("2026-04-22T00:00:00Z"); // 原创建时间保留
+      expect(ev.updatedAt).to.equal("2026-04-22T10:00:00Z");
+      expect(ev.txId).to.equal("tx-v2");
+      expect(ev.patientId).to.equal("2");            // 继承
+      expect(ev.uploaderHospital).to.equal("HospitalA"); // 继承
+
+      // v2 键存在、LATEST 指向 v2、v1 键仍保留原样
+      expect(readState(ctx2, "RECORD_1_v2").version).to.equal(2);
+      expect(readState(ctx2, "RECORD_LATEST_1").version).to.equal(2);
+      expect(readState(ctx2, "RECORD_1_v1").version).to.equal(1);
+      expect(readState(ctx2, "RECORD_1_v1").dataHash).to.equal("hash-v1");
+    });
+
+    it("连续修订 5 次应形成长度为 5 的版本链，previousTxId 指向前一版", async () => {
+      // 基线：ctx 已有 v1
+      const txIds = ["tx-test-0001"]; // v1 的 txId
+      let currentState = new Map();
+      for (const [k, v] of ctx.stub._state.entries()) {
+        currentState.set(k, Buffer.from(v));
+      }
+
+      for (let v = 2; v <= 5; v++) {
+        const txId = `tx-v${v}`;
+        const stepCtx = makeMockContext({ txId });
+        // 累积状态
+        for (const [k, val] of currentState.entries()) {
+          stepCtx.stub._state.set(k, Buffer.from(val));
+        }
+        await contract.UpdateMedicalRecordEvidence(
+          stepCtx, "1", `hash-v${v}`, `2026-04-22T${String(v).padStart(2,"0")}:00:00Z`
+        );
+        txIds.push(txId);
+        // 更新累积状态
+        currentState = new Map();
+        for (const [k, val] of stepCtx.stub._state.entries()) {
+          currentState.set(k, Buffer.from(val));
+        }
+      }
+
+      // 最终 LATEST 应为 v5
+      const finalCtx = makeMockContext();
+      for (const [k, val] of currentState.entries()) {
+        finalCtx.stub._state.set(k, Buffer.from(val));
+      }
+
+      const latest = JSON.parse(await contract.GetRecordLatest(finalCtx, "1"));
+      expect(latest.version).to.equal(5);
+      expect(latest.dataHash).to.equal("hash-v5");
+
+      // 回溯版本链：每版 previousTxId 应指向前一版 txId
+      for (let v = 1; v <= 5; v++) {
+        const raw = await contract.GetRecordVersion(finalCtx, "1", String(v));
+        const ev = JSON.parse(raw);
+        expect(ev.version).to.equal(v);
+        expect(ev.txId).to.equal(txIds[v - 1]);
+        const expectedPrev = v === 1 ? "" : txIds[v - 2];
+        expect(ev.previousTxId).to.equal(expectedPrev);
+      }
+    });
+
+    it("修订不存在的记录应抛错", async () => {
+      await expect(
+        contract.UpdateMedicalRecordEvidence(
+          ctx, "999", "anyhash", "2026-04-22T10:00:00Z"
+        )
+      ).to.be.rejectedWith(/not found/);
+    });
+  });
+
+  describe("GetRecordVersion", () => {
+    it("查询已存在的指定版本成功", async () => {
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "hash-v1", "2026-04-22T00:00:00Z"
+      );
+      const raw = await contract.GetRecordVersion(ctx, "1", "1");
+      expect(JSON.parse(raw).version).to.equal(1);
+    });
+
+    it("查询不存在的版本应抛错", async () => {
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "hash-v1", "2026-04-22T00:00:00Z"
+      );
+      await expect(
+        contract.GetRecordVersion(ctx, "1", "99")
+      ).to.be.rejectedWith(/version 99 not found/);
     });
   });
 

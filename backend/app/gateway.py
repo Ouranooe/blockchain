@@ -91,3 +91,30 @@ def reject_access_request(*, hospital_name: str, request_id: int, reviewed_at: s
 
 def query_access_request(request_id: int) -> dict:
     return _get(f"/access-requests/{request_id}")
+
+
+# ---------- 迭代 2：病历版本链 ----------
+
+def revise_record_evidence(
+    *,
+    hospital_name: str,
+    record_id: int,
+    new_data_hash: str,
+    updated_at: str,
+) -> dict:
+    return _post(
+        f"/records/evidence/{record_id}/revise",
+        {
+            "org": _hospital_to_org(hospital_name),
+            "newDataHash": new_data_hash,
+            "updatedAt": updated_at,
+        },
+    )
+
+
+def query_record_version(record_id: int, version: int) -> dict:
+    return _get(f"/records/evidence/{record_id}/version/{version}")
+
+
+def query_record_latest(record_id: int) -> dict:
+    return _get(f"/records/evidence/{record_id}")

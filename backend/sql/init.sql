@@ -29,10 +29,17 @@ CREATE TABLE IF NOT EXISTS medical_records (
   content TEXT NOT NULL,
   content_hash VARCHAR(64) NOT NULL,
   tx_id VARCHAR(128) NULL,
+  version INT NOT NULL DEFAULT 1,
+  previous_tx_id VARCHAR(128) NULL,
+  updated_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_record_patient FOREIGN KEY (patient_id) REFERENCES users(id),
   CONSTRAINT fk_record_uploader FOREIGN KEY (uploader_hospital_id) REFERENCES users(id)
 );
+-- 迭代 2 新增列。若升级旧库请手动执行：
+--   ALTER TABLE medical_records ADD COLUMN version INT NOT NULL DEFAULT 1;
+--   ALTER TABLE medical_records ADD COLUMN previous_tx_id VARCHAR(128) NULL;
+--   ALTER TABLE medical_records ADD COLUMN updated_at DATETIME NULL;
 
 CREATE TABLE IF NOT EXISTS access_requests (
   id INT PRIMARY KEY AUTO_INCREMENT,

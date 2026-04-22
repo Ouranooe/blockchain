@@ -77,7 +77,57 @@ def client(db_engine, db_session, monkeypatch):
             return {"txId": f"{prefix}-stub-tx"}
         return _inner
 
-    monkeypatch.setattr(gateway_module, "create_record_evidence", _stub_tx("rec"))
+    # 迭代 2：仅为网关调用建立确定性桩。_chain_store 模拟链上世界状态，
+    #          供 query_record_version 等只读查询返回真实的历史数据。
+    chain_store: dict = {"records": {}}  # record_id -> list[version dict]
+
+    def stub_create_record(**kwargs):
+        rid = int(kwargs["record_id"])
+        tx = f"rec-{rid}-v1"
+        chain_store["records"][rid] = [
+            {
+                "docType": "RecordEvidence",
+                "recordId": str(rid),
+                "patientId": str(kwargs["patient_id"]),
+                "uploaderHospital": kwargs["hospital_name"],
+                "dataHash": kwargs["data_hash"],
+                "version": 1,
+                "previousTxId": "",
+                "createdAt": kwargs["created_at"],
+                "updatedAt": kwargs["created_at"],
+                "txId": tx,
+            }
+        ]
+        return {"txId": tx, "result": chain_store["records"][rid][0]}
+
+    def stub_revise_record(**kwargs):
+        rid = int(kwargs["record_id"])
+        if rid not in chain_store["records"]:
+            raise RuntimeError(f"Record evidence {rid} not found")
+        prev = chain_store["records"][rid][-1]
+        new_version = prev["version"] + 1
+        tx = f"rec-{rid}-v{new_version}"
+        new_entry = {
+            **prev,
+            "dataHash": kwargs["new_data_hash"],
+            "version": new_version,
+            "previousTxId": prev["txId"],
+            "updatedAt": kwargs["updated_at"],
+            "txId": tx,
+        }
+        chain_store["records"][rid].append(new_entry)
+        return {"txId": tx, "result": new_entry}
+
+    def stub_query_record_version(record_id: int, version: int):
+        entries = chain_store["records"].get(int(record_id), [])
+        for e in entries:
+            if int(e["version"]) == int(version):
+                return {"result": e}
+        return {"result": None}
+
+    monkeypatch.setattr(gateway_module, "create_record_evidence", stub_create_record)
+    monkeypatch.setattr(gateway_module, "revise_record_evidence", stub_revise_record)
+    monkeypatch.setattr(gateway_module, "query_record_version", stub_query_record_version)
     monkeypatch.setattr(gateway_module, "create_access_request", _stub_tx("req"))
     monkeypatch.setattr(gateway_module, "approve_access_request", _stub_tx("apr"))
     monkeypatch.setattr(gateway_module, "reject_access_request", _stub_tx("rej"))
@@ -85,7 +135,9 @@ def client(db_engine, db_session, monkeypatch):
         gateway_module, "query_access_request", lambda request_id: {"result": {}, "txId": ""}
     )
     # main.py 里以 `from .gateway import ...` 导入了引用，需要一并替换
-    monkeypatch.setattr(main_module, "create_record_evidence", _stub_tx("rec"))
+    monkeypatch.setattr(main_module, "create_record_evidence", stub_create_record)
+    monkeypatch.setattr(main_module, "revise_record_evidence", stub_revise_record)
+    monkeypatch.setattr(main_module, "query_record_version", stub_query_record_version)
     monkeypatch.setattr(main_module, "create_access_request", _stub_tx("req"))
     monkeypatch.setattr(main_module, "approve_access_request", _stub_tx("apr"))
     monkeypatch.setattr(main_module, "reject_access_request", _stub_tx("rej"))

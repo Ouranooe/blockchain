@@ -143,6 +143,38 @@ app.get("/api/records/evidence/:recordId", async (req, res) => {
   }
 });
 
+// 迭代 2：病历修订（生成新版本）
+app.post("/api/records/evidence/:recordId/revise", async (req, res) => {
+  const { org, newDataHash, updatedAt } = req.body;
+  if (!newDataHash || !updatedAt) {
+    return res.status(400).json({ message: "missing required fields" });
+  }
+  try {
+    const result = await submit(org, "UpdateMedicalRecordEvidence", [
+      String(req.params.recordId),
+      String(newDataHash),
+      String(updatedAt)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// 迭代 2：查询指定版本
+app.get("/api/records/evidence/:recordId/version/:version", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "GetRecordVersion", [
+      String(req.params.recordId),
+      String(req.params.version)
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 app.post("/api/access-requests", async (req, res) => {
   const { org, requestId, recordId, applicantHospital, reasonHash, status, createdAt } = req.body;
   if (!requestId || !recordId || !applicantHospital || !reasonHash || !createdAt) {

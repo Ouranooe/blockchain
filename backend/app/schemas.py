@@ -49,6 +49,13 @@ class MedicalRecordCreate(BaseModel):
     content: str = Field(min_length=1)
 
 
+class MedicalRecordRevise(BaseModel):
+    """迭代 2：病历修订请求（仅原上传医院可调用）。"""
+
+    diagnosis: Optional[str] = Field(default=None, max_length=255)
+    content: str = Field(min_length=1)
+
+
 class MedicalRecordItem(BaseModel):
     id: int
     patient_id: int
@@ -58,9 +65,31 @@ class MedicalRecordItem(BaseModel):
     diagnosis: str
     content_hash: str
     tx_id: Optional[str] = None
+    version: int = 1
+    previous_tx_id: Optional[str] = None
+    updated_at: Optional[datetime] = None
     created_at: datetime
     can_view_content: bool = False
     content: Optional[str] = None
+
+
+class RecordVersionItem(BaseModel):
+    """迭代 2：单个历史版本（来源于链上）。"""
+
+    version: int
+    data_hash: str
+    tx_id: str
+    previous_tx_id: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class RecordHistory(BaseModel):
+    """迭代 2：病历完整版本链。"""
+
+    record_id: int
+    latest_version: int
+    versions: list[RecordVersionItem]
 
 
 class AccessRequestCreate(BaseModel):
