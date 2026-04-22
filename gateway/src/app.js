@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const NodeCache = require("node-cache");
 const { Gateway, Wallets } = require("fabric-network");
@@ -360,6 +361,135 @@ app.get("/api/access-requests/:requestId", async (req, res) => {
   }
 });
 
+// ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------
+//
+// 设计：
+//   - 对每个组织启动一个独立监听器（Org1/Org2）
+//   - 监听器 offset 持久化到磁盘（block + txIndex），断线重连可从断点恢复
+//   - 收到事件后 POST 给后端的 /internal/events（本项目当前通过 backend 内嵌总线
+//     直接 emit 避免双通道；真实部署时把 BACKEND_EVENT_URL 指到后端即可启用）。
+//
+// 控制环境变量：
+//   ENABLE_CHAINCODE_LISTENER=1        启用
+//   BACKEND_EVENT_URL=http://backend:8000/internal/events   （可选）
+//   LISTENER_OFFSET_PATH=/data/listener-offset.json
+
+const LISTENER_ENABLED =
+  (process.env.ENABLE_CHAINCODE_LISTENER || "0") === "1";
+const BACKEND_EVENT_URL = process.env.BACKEND_EVENT_URL || "";
+const OFFSET_PATH =
+  process.env.LISTENER_OFFSET_PATH || path.join(__dirname, "listener-offset.json");
+
+function loadOffsets() {
+  try {
+    if (fs.existsSync(OFFSET_PATH)) {
+      return JSON.parse(fs.readFileSync(OFFSET_PATH, "utf8"));
+    }
+  } catch (e) {
+    console.warn("[listener] offset 读取失败：", e.message);
+  }
+  return {};
+}
+
+function saveOffsets(offsets) {
+  try {
+    fs.writeFileSync(OFFSET_PATH, JSON.stringify(offsets, null, 2), "utf8");
+  } catch (e) {
+    console.warn("[listener] offset 写入失败：", e.message);
+  }
+}
+
+function forwardEventToBackend(event) {
+  if (!BACKEND_EVENT_URL) return;
+  const body = JSON.stringify(event);
+  try {
+    const req = http.request(BACKEND_EVENT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+      timeout: 2000,
+    });
+    req.on("error", (err) =>
+      console.warn("[listener] 转发到后端失败：", err.message)
+    );
+    req.write(body);
+    req.end();
+  } catch (e) {
+    console.warn("[listener] 构造转发请求失败：", e.message);
+  }
+}
+
+async function startChaincodeListener(org) {
+  const offsets = loadOffsets();
+  const startBlock = offsets[org] !== undefined ? BigInt(offsets[org]) : undefined;
+  console.log(
+    `[listener][${org}] 启动；startBlock=${startBlock === undefined ? "latest" : startBlock}`
+  );
+
+  await withContract(org, async (contract) => {
+    const options = startBlock !== undefined ? { startBlock } : undefined;
+    const listener = await contract.addContractListener(
+      async (event) => {
+        try {
+          const payload = {
+            eventName: event.eventName,
+            chaincodeName: event.chaincodeName,
+            txId: event.transactionId,
+            blockNumber: event.getBlockEvent
+              ? String(event.getBlockEvent().blockNumber)
+              : undefined,
+            data: event.payload ? JSON.parse(event.payload.toString("utf8")) : null,
+            caughtAt: new Date().toISOString(),
+            org,
+          };
+          forwardEventToBackend(payload);
+          // 持久化 offset
+          const nextBlock =
+            event.getBlockEvent && event.getBlockEvent().blockNumber !== undefined
+              ? BigInt(event.getBlockEvent().blockNumber) + 1n
+              : undefined;
+          if (nextBlock !== undefined) {
+            const o = loadOffsets();
+            o[org] = String(nextBlock);
+            saveOffsets(o);
+          }
+        } catch (e) {
+          console.warn("[listener] 事件处理异常：", e.message);
+        }
+      },
+      options
+    );
+    // 保持监听器不退出：withContract 的 gateway.disconnect() 会在函数 return 后触发，
+    // 所以这里返回一个永远不 resolve 的 Promise 让 contract 保活。
+    console.log(`[listener][${org}] 已挂载；将持续监听事件`);
+    await new Promise(() => {});
+    return listener; // unreachable
+  }).catch((e) => {
+    console.error(`[listener][${org}] 异常退出，5s 后重连：`, e.message);
+    setTimeout(() => startChaincodeListener(org), 5000);
+  });
+}
+
+if (LISTENER_ENABLED) {
+  setTimeout(() => {
+    startChaincodeListener("org1").catch((e) =>
+      console.error("[listener][org1] 启动失败：", e.message)
+    );
+    startChaincodeListener("org2").catch((e) =>
+      console.error("[listener][org2] 启动失败：", e.message)
+    );
+  }, 3000);
+}
+
 app.listen(PORT, () => {
   console.log(`Gateway listening on :${PORT}`);
+  if (LISTENER_ENABLED) {
+    console.log(
+      `[listener] 已启用；offset 文件：${OFFSET_PATH}；转发地址：${BACKEND_EVENT_URL || "(未配置，仅本地打印)"}`
+    );
+  } else {
+    console.log("[listener] 未启用（设 ENABLE_CHAINCODE_LISTENER=1 开启）");
+  }
 });

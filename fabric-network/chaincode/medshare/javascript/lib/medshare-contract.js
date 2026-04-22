@@ -176,6 +176,19 @@ class MedShareContract extends Contract {
 
     await this._putStateAsObject(ctx, this._versionKey(recordId, 1), evidence);
     await this._putStateAsObject(ctx, latestKey, evidence);
+    ctx.stub.setEvent(
+      "RecordCreated",
+      Buffer.from(
+        JSON.stringify({
+          recordId,
+          patientId,
+          uploaderHospital,
+          dataHash,
+          version: 1,
+          txId: evidence.txId,
+        })
+      )
+    );
     return JSON.stringify(evidence);
   }
 
@@ -206,6 +219,20 @@ class MedShareContract extends Contract {
       newEvidence
     );
     await this._putStateAsObject(ctx, latestKey, newEvidence);
+    ctx.stub.setEvent(
+      "RecordUpdated",
+      Buffer.from(
+        JSON.stringify({
+          recordId,
+          patientId: newEvidence.patientId,
+          uploaderHospital: newEvidence.uploaderHospital,
+          dataHash: newDataHash,
+          version: newVersion,
+          previousTxId: latest.txId,
+          txId: newEvidence.txId,
+        })
+      )
+    );
     return JSON.stringify(newEvidence);
   }
 

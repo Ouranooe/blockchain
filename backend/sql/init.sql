@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS access_requests (
 --   ALTER TABLE access_requests ADD COLUMN revoked_at DATETIME NULL;
 --   ALTER TABLE access_requests ADD COLUMN revoke_tx_id VARCHAR(128) NULL;
 
+-- 迭代 6：审计事件持久化
+CREATE TABLE IF NOT EXISTS audit_events (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  event_type VARCHAR(64) NOT NULL,
+  actor_id INT NULL,
+  actor_role VARCHAR(32) NULL,
+  subject_user_id INT NULL,
+  record_id INT NULL,
+  request_id INT NULL,
+  tx_id VARCHAR(128) NULL,
+  message VARCHAR(512) NULL,
+  payload_json TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_type (event_type),
+  INDEX idx_audit_subject (subject_user_id),
+  INDEX idx_audit_actor (actor_id),
+  INDEX idx_audit_time (created_at)
+);
+
 -- 注：初始种子密码仍为明文 '123456'，首次成功登录时后端会自动替换为 bcrypt 哈希
 INSERT INTO users (id, username, password, role, real_name, hospital_name, msp_org, is_active) VALUES
   (1, 'admin',      '123456', 'admin',    '系统管理员',   NULL,        NULL,      1),

@@ -31,12 +31,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import events as events_module
 from app import files as files_module
 from app import gateway as gateway_module
 from app import main as main_module
 from app.database import Base, get_db
 from app.main import app
-from app.models import User
+from app.models import AuditEventRow, User
 from app.security import hash_password
 
 
@@ -78,6 +79,17 @@ def client(db_engine, db_session, monkeypatch):
             s.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # 迭代 6：重置事件总线（每个测试 TestClient 新建一个 asyncio loop，
+    # 单例 bus 的 queue/loop 需要跟随重置，避免"Queue bound to different event loop"）
+    from app import events as _events
+    _events.bus._ws_subscribers = {}
+    _events.bus._admin_subscribers = set()
+    _events.bus._audit_queue = None
+    _events.bus._lock = None
+    _events.bus._flusher_task = None
+    _events.bus._main_loop = None
+    _events.bus.stats = {"emitted": 0, "broadcast": 0, "persisted": 0}
 
     # 将所有网关调用打桩为固定返回值，避免出网
     def _stub_tx(prefix: str):
@@ -415,6 +427,35 @@ def client(db_engine, db_session, monkeypatch):
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]
     app.state.chain_store = chain_store
+
+    # 迭代 6：让事件总线把审计写到测试 db_engine，而非 app.database 的默认 engine
+    import json as _json
+
+    def _test_persist(events):
+        if not events:
+            return
+        s = TestingSession()
+        try:
+            rows = [
+                AuditEventRow(
+                    event_type=e.event_type,
+                    actor_id=e.actor_id,
+                    actor_role=e.actor_role,
+                    subject_user_id=e.subject_user_id,
+                    record_id=e.record_id,
+                    request_id=e.request_id,
+                    tx_id=e.tx_id,
+                    message=e.message,
+                    payload_json=_json.dumps(e.payload, ensure_ascii=False),
+                )
+                for e in events
+            ]
+            s.bulk_save_objects(rows)
+            s.commit()
+        finally:
+            s.close()
+
+    events_module.bus.set_persister(_test_persist)
 
     with TestClient(app) as c:
         yield c

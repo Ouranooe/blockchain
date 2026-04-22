@@ -33,6 +33,7 @@ from .crypto_util import (
     sha256_of_bytes,
 )
 from .database import get_db
+from .events import AuditEvent as AuditPayload, bus
 from .gateway import access_record_consume, create_record_evidence
 from .models import AccessRequest, MedicalRecord, User
 from .schemas import FileVerifyResult, MedicalRecordItem
@@ -203,6 +204,27 @@ def upload_record_file(
     db.commit()
     db.refresh(record)
 
+    try:
+        bus.emit_sync(
+            AuditPayload(
+                event_type="RecordCreated",
+                actor_id=current_user.id,
+                actor_role=current_user.role,
+                subject_user_id=record.patient_id,
+                record_id=record.id,
+                tx_id=record.tx_id,
+                message=f"{current_user.hospital_name or current_user.username} 上传了一份带文件的病历",
+                payload={
+                    "title": record.title,
+                    "file_name": record.file_name,
+                    "file_size": record.file_size,
+                    "version": 1,
+                },
+            )
+        )
+    except Exception:
+        logger.exception("emit RecordCreated failed")
+
     users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
     return _record_to_item(record, users, True)
 
@@ -300,7 +322,18 @@ def download_record_file(
         raise HTTPException(status_code=404, detail="病历不存在")
     if not record.file_path:
         raise HTTPException(status_code=400, detail="该病历没有附件文件")
-    if not _authorize_file_access(current_user, record, db):
+
+    # 迭代 6：权限检查分派 —— admin / 患者本人 / 本院医生直接放行；
+    #         其他角色走"需要链上授权消费"路径
+    is_privileged = (
+        current_user.role == "admin"
+        or (current_user.role == "patient" and record.patient_id == current_user.id)
+        or (
+            current_user.role == "hospital"
+            and record.uploader_hospital_id == current_user.id
+        )
+    )
+    if not is_privileged and current_user.role != "hospital":
         raise HTTPException(status_code=403, detail="无权限下载该文件")
 
     # 迭代 5：非本院医生下载 = 消费一次链上授权（链码内做守卫 + 扣减 remainingReads）
@@ -321,6 +354,24 @@ def download_record_file(
             .first()
         )
         if not req:
+            # 迭代 6：后端已能判定无有效授权，也记录一次未授权尝试
+            try:
+                bus.emit_sync(
+                    AuditPayload(
+                        event_type="UnauthorizedAttempt",
+                        actor_id=current_user.id,
+                        actor_role=current_user.role,
+                        subject_user_id=record.patient_id,
+                        record_id=record.id,
+                        message=(
+                            f"{current_user.hospital_name or current_user.username} "
+                            f"尝试下载病历 #{record.id}，但无有效授权"
+                        ),
+                        payload={"reason": "no-approved-request"},
+                    )
+                )
+            except Exception:
+                logger.exception("emit UnauthorizedAttempt failed")
             raise HTTPException(status_code=403, detail="没有已批准的授权")
         try:
             result = access_record_consume(
@@ -330,6 +381,25 @@ def download_record_file(
             )
         except RuntimeError as exc:
             # 链码层拒绝（过期 / 耗尽 / MSP 不匹配 / 已撤销 / 状态非 APPROVED）
+            # 迭代 6：记录一次"未授权访问尝试"审计
+            try:
+                bus.emit_sync(
+                    AuditPayload(
+                        event_type="UnauthorizedAttempt",
+                        actor_id=current_user.id,
+                        actor_role=current_user.role,
+                        subject_user_id=record.patient_id,
+                        record_id=record.id,
+                        request_id=req.id,
+                        message=(
+                            f"{current_user.hospital_name or current_user.username} "
+                            f"尝试下载病历 #{record.id}，但被链码层拒绝：{exc}"
+                        ),
+                        payload={"reason": str(exc)},
+                    )
+                )
+            except Exception:
+                logger.exception("emit UnauthorizedAttempt failed")
             raise HTTPException(
                 status_code=403, detail=f"链码层拒绝授权：{exc}"
             ) from exc
@@ -345,6 +415,28 @@ def download_record_file(
                 # 链上允许的最后一次消费已经完成；后续状态由 AccessRecord 自身守卫
                 pass
             db.commit()
+
+        # 迭代 6：广播"病历被访问"事件 —— 推给患者
+        try:
+            bus.emit_sync(
+                AuditPayload(
+                    event_type="AccessRecorded",
+                    actor_id=current_user.id,
+                    actor_role=current_user.role,
+                    subject_user_id=record.patient_id,
+                    extra_subject_ids=[current_user.id],
+                    record_id=record.id,
+                    request_id=req.id,
+                    tx_id=consume_tx,
+                    message=(
+                        f"{current_user.hospital_name or current_user.username} "
+                        f"下载了您的病历 #{record.id}（剩余 {consume_remaining} 次）"
+                    ),
+                    payload={"remaining_reads": consume_remaining},
+                )
+            )
+        except Exception:
+            logger.exception("emit AccessRecorded failed")
 
     plaintext, actual_hash = _verify_and_get_plaintext(record)
     total = len(plaintext)

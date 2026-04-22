@@ -61,6 +61,12 @@ body {
   align-items: center;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .role-tag {
   font-size: 12px;
   color: var(--sub);

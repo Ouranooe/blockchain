@@ -1,15 +1,27 @@
+import asyncio
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import or_
+from jose import JWTError, jwt
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from .auth import create_access_token, get_current_user, require_role
+from .auth import ALGORITHM, create_access_token, get_current_user, require_role
 from .config import settings
 from .database import Base, engine, get_db
+from .events import AuditEvent as AuditPayload, bus
 from .files import router as files_router
 from .gateway import (
     approve_access_request,
@@ -23,7 +35,7 @@ from .gateway import (
     revise_record_evidence,
     revoke_access_request,
 )
-from .models import AccessRequest, MedicalRecord, User
+from .models import AccessRequest, AuditEventRow, MedicalRecord, User
 from .schemas import (
     AccessRequestChainHistory,
     AccessRequestCreate,
@@ -58,11 +70,30 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     Base.metadata.create_all(bind=engine)
+    # 迭代 6：事件总线异步任务启动（批量写审计 + WebSocket 广播）
+    await bus.start()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bus.stop()
 
 
 app.include_router(files_router)
+
+
+# ---------------- 迭代 6：事件发射 helpers ----------------
+
+def _safe_emit(event: AuditPayload) -> None:
+    """在业务流中调用；异常不影响主流程。"""
+    try:
+        bus.emit_sync(event)
+    except Exception:  # pragma: no cover - 事件总线异常不应影响业务
+        import logging as _logging
+
+        _logging.getLogger(__name__).exception("emit event failed")
 
 
 def _user_map(db: Session, ids: List[int]) -> Dict[int, User]:
@@ -361,6 +392,19 @@ def create_record(
     db.commit()
     db.refresh(record)
     users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
+
+    _safe_emit(
+        AuditPayload(
+            event_type="RecordCreated",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=record.patient_id,
+            record_id=record.id,
+            tx_id=record.tx_id,
+            message=f"{current_user.hospital_name or current_user.username} 上传了一条新病历",
+            payload={"title": record.title, "version": 1},
+        )
+    )
     return _record_to_item(record, users, True)
 
 
@@ -419,6 +463,19 @@ def submit_access_request(
     db.refresh(access_request)
     users = _user_map(db, [access_request.applicant_hospital_id, access_request.patient_id])
     records = {record.id: record}
+
+    _safe_emit(
+        AuditPayload(
+            event_type="AccessRequestCreated",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=record.patient_id,
+            record_id=record.id,
+            request_id=access_request.id,
+            tx_id=access_request.create_tx_id,
+            message=f"{current_user.hospital_name or current_user.username} 申请访问您的病历 #{record.id}",
+        )
+    )
     return _request_to_item(access_request, users, records)
 
 
@@ -537,6 +594,30 @@ def review_access_request(
         req.expires_at = now + timedelta(days=int(payload.duration_days))
     db.commit()
     db.refresh(req)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="AccessApproved" if decision == "APPROVED" else "AccessRejected",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=req.applicant_hospital_id,
+            record_id=req.record_id,
+            request_id=req.id,
+            tx_id=req.review_tx_id,
+            message=(
+                f"您对病历 #{req.record_id} 的申请已被{'批准' if decision == 'APPROVED' else '拒绝'}"
+                + (
+                    f"（有效 {payload.duration_days} 天，{payload.max_reads} 次）"
+                    if decision == "APPROVED"
+                    else ""
+                )
+            ),
+            payload={
+                "duration_days": payload.duration_days,
+                "max_reads": payload.max_reads,
+            } if decision == "APPROVED" else {},
+        )
+    )
 
     users = _user_map(db, [req.applicant_hospital_id, req.patient_id])
     records = {record.id: record}
@@ -698,6 +779,19 @@ def revise_record(
     db.commit()
     db.refresh(record)
     users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
+
+    _safe_emit(
+        AuditPayload(
+            event_type="RecordUpdated",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=record.patient_id,
+            record_id=record.id,
+            tx_id=record.tx_id,
+            message=f"{current_user.hospital_name or current_user.username} 修订了您的病历 #{record.id}（v{record.version}）",
+            payload={"version": record.version, "previous_tx_id": record.previous_tx_id},
+        )
+    )
     return _record_to_item(record, users, True)
 
 
@@ -918,4 +1012,132 @@ def revoke_access_request_api(
     users = _user_map(db, [req.applicant_hospital_id, req.patient_id])
     record = db.query(MedicalRecord).filter(MedicalRecord.id == req.record_id).first()
     records = {record.id: record} if record else {}
+
+    _safe_emit(
+        AuditPayload(
+            event_type="AccessRevoked",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=req.applicant_hospital_id,  # 通知申请医院
+            record_id=req.record_id,
+            request_id=req.id,
+            tx_id=req.revoke_tx_id,
+            message=f"患者撤销了对病历 #{req.record_id} 的授权",
+        )
+    )
     return _request_to_item(req, users, records)
+
+
+# ---------------- 迭代 6：WebSocket 通知 + 审计事件查询 ----------------
+
+
+def _authenticate_ws(token: str, db: Session) -> Optional[User]:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, ValueError, TypeError):
+        return None
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        return None
+    return user
+
+
+@app.websocket("/ws/notifications")
+async def ws_notifications(
+    websocket: WebSocket,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        user = _authenticate_ws(token, db)
+    finally:
+        db.close()
+    if not user:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    queue = await bus.subscribe(user.id, is_admin=(user.role == "admin"))
+    await websocket.send_json(
+        {
+            "event_type": "_connected",
+            "message": f"已订阅：{user.username}",
+            "timestamp_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+    )
+
+    async def reader():
+        # 客户端可能发心跳；我们只读取以检测断开
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            raise
+
+    async def writer():
+        while True:
+            msg = await queue.get()
+            await websocket.send_json(msg)
+
+    try:
+        reader_task = asyncio.create_task(reader())
+        writer_task = asyncio.create_task(writer())
+        done, pending = await asyncio.wait(
+            {reader_task, writer_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await bus.unsubscribe(user.id, queue)
+
+
+@app.get(f"{settings.API_PREFIX}/audit/events", response_model=List[Dict])
+def list_audit_events(
+    event_type: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """迭代 6：持久化审计事件流。
+    - admin：可查全部
+    - hospital / patient：仅可查与自己相关（actor_id == me 或 subject_user_id == me）
+    """
+    q = db.query(AuditEventRow)
+    if current_user.role != "admin":
+        q = q.filter(
+            or_(
+                AuditEventRow.actor_id == current_user.id,
+                AuditEventRow.subject_user_id == current_user.id,
+            )
+        )
+    if event_type:
+        q = q.filter(AuditEventRow.event_type == event_type)
+    rows = q.order_by(AuditEventRow.created_at.desc()).offset(offset).limit(limit).all()
+    out: List[Dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json) if row.payload_json else {}
+        except Exception:
+            payload = {}
+        out.append(
+            {
+                "id": row.id,
+                "event_type": row.event_type,
+                "actor_id": row.actor_id,
+                "actor_role": row.actor_role,
+                "subject_user_id": row.subject_user_id,
+                "record_id": row.record_id,
+                "request_id": row.request_id,
+                "tx_id": row.tx_id,
+                "message": row.message,
+                "payload": payload,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
+    return out

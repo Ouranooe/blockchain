@@ -15,7 +15,10 @@
           <strong>{{ user.real_name || user.username }}</strong>
           <span class="role-tag">{{ roleLabel }}</span>
         </div>
-        <el-button type="danger" plain @click="logout">退出登录</el-button>
+        <div class="header-right">
+          <NotificationBell />
+          <el-button type="danger" plain @click="logout">退出登录</el-button>
+        </div>
       </el-header>
 
       <el-main class="layout-main">
@@ -28,6 +31,8 @@
 <script setup>
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
+
+import NotificationBell from "./NotificationBell.vue";
 
 const route = useRoute();
 const router = useRouter();

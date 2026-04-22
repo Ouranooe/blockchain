@@ -46,6 +46,26 @@ class MedicalRecord(Base):
     file_tag_b64 = Column(String(64), nullable=True)
 
 
+class AuditEventRow(Base):
+    """迭代 6：链码事件持久化表。每条对应一次"链上发生的事件"（或后端捕获到的异常尝试）。"""
+
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    # 触发方（可为空，例如 UnauthorizedAttempt 可能来自未认证的请求）
+    actor_id = Column(Integer, nullable=True, index=True)
+    actor_role = Column(String(32), nullable=True)
+    # 事件关注的"主体用户"——通知投递目标
+    subject_user_id = Column(Integer, nullable=True, index=True)
+    record_id = Column(Integer, nullable=True, index=True)
+    request_id = Column(Integer, nullable=True, index=True)
+    tx_id = Column(String(128), nullable=True)
+    message = Column(String(512), nullable=True)
+    payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
+
+
 class AccessRequest(Base):
     __tablename__ = "access_requests"
 

@@ -461,6 +461,53 @@ describe("MedShareContract", () => {
     });
   });
 
+  describe("链码事件（迭代 6）", () => {
+    it("CreateMedicalRecordEvidence 触发 RecordCreated", async () => {
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "e1", "2", "HospitalA", "h1", "2026-04-22T00:00:00Z"
+      );
+      const ev = ctx.stub._events.find((e) => e.name === "RecordCreated");
+      expect(ev).to.not.be.undefined;
+      const payload = JSON.parse(ev.payload.toString("utf8"));
+      expect(payload.recordId).to.equal("e1");
+      expect(payload.patientId).to.equal("2");
+      expect(payload.version).to.equal(1);
+      expect(payload.txId).to.be.a("string");
+    });
+
+    it("UpdateMedicalRecordEvidence 触发 RecordUpdated（带 version / previousTxId）", async () => {
+      ctx.stub.setTxID("tx-c");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "e2", "2", "HospitalA", "h1", "2026-04-22T00:00:00Z"
+      );
+      ctx.stub.setTxID("tx-u");
+      await contract.UpdateMedicalRecordEvidence(
+        ctx, "e2", "h2", "2026-04-22T10:00:00Z"
+      );
+      const events = ctx.stub._events.filter((e) => e.name === "RecordUpdated");
+      expect(events).to.have.lengthOf(1);
+      const payload = JSON.parse(events[0].payload.toString("utf8"));
+      expect(payload.recordId).to.equal("e2");
+      expect(payload.version).to.equal(2);
+      expect(payload.previousTxId).to.equal("tx-c");
+      expect(payload.txId).to.equal("tx-u");
+    });
+
+    it("审批/撤销/消费各触发对应事件", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await seedPending(contract, ctx, { reqId: "e10", patientId: "2" });
+      await contract.ApproveAccessRequest(ctx, "e10", "t1", 7, 3);
+      await contract.AccessRecord(ctx, "e10", "t2");
+      await contract.RevokeAccessRequest(ctx, "e10", "2", "t3");
+
+      const names = ctx.stub._events.map((e) => e.name);
+      expect(names).to.include("AccessRequestCreated");
+      expect(names).to.include("AccessApproved");
+      expect(names).to.include("AccessRecorded");
+      expect(names).to.include("AccessRevoked");
+    });
+  });
+
   describe("端到端：状态机表驱动测试", () => {
     it("合法跃迁矩阵全通过", async () => {
       // PENDING → APPROVED
