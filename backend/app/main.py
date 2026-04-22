@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .auth import create_access_token, get_current_user, require_role
 from .config import settings
 from .database import Base, engine, get_db
+from .files import router as files_router
 from .gateway import (
     approve_access_request,
     create_access_request,
@@ -60,6 +61,9 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
 
 
+app.include_router(files_router)
+
+
 def _user_map(db: Session, ids: List[int]) -> Dict[int, User]:
     if not ids:
         return {}
@@ -85,6 +89,10 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
         created_at=record.created_at,
         can_view_content=can_view,
         content=record.content if can_view else None,
+        has_file=bool(record.file_path),
+        file_name=record.file_name,
+        file_mime=record.file_mime,
+        file_size=record.file_size,
     )
 
 

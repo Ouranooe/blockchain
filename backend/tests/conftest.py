@@ -12,6 +12,13 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-pytest-only-0123456789")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("GATEWAY_URL", "http://gateway-stub.invalid/api")
+# 迭代 4：文件存储根目录指向 tmp，每个会话隔离
+import tempfile as _tempfile
+_TEST_STORAGE_DIR = os.path.join(
+    _tempfile.gettempdir(), f"medshare-test-storage-{os.getpid()}"
+)
+os.makedirs(_TEST_STORAGE_DIR, exist_ok=True)
+os.environ.setdefault("MEDSHARE_STORAGE_DIR", _TEST_STORAGE_DIR)
 
 # 保证 tests 目录可直接运行：把 backend/ 加入 sys.path
 _BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -24,6 +31,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import files as files_module
 from app import gateway as gateway_module
 from app import main as main_module
 from app.database import Base, get_db
@@ -243,21 +251,31 @@ def client(db_engine, db_session, monkeypatch):
         _cache_set(key, payload)
         return {**payload, "cache": "miss"}
 
-    for target in (gateway_module, main_module):
-        monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
-        monkeypatch.setattr(target, "revise_record_evidence", stub_revise_record)
-        monkeypatch.setattr(target, "query_record_version", stub_query_record_version)
-        monkeypatch.setattr(target, "query_record_history", stub_query_record_history)
-        monkeypatch.setattr(target, "create_access_request", stub_create_access_request)
-        monkeypatch.setattr(target, "approve_access_request", stub_approve_access_request)
-        monkeypatch.setattr(target, "reject_access_request", stub_reject_access_request)
-        monkeypatch.setattr(target, "query_access_request", stub_query_access_request)
-        monkeypatch.setattr(
-            target, "query_access_request_history", stub_query_access_request_history
-        )
+    for target in (gateway_module, main_module, files_module):
+        if hasattr(target, "create_record_evidence"):
+            monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
+        if hasattr(target, "revise_record_evidence"):
+            monkeypatch.setattr(target, "revise_record_evidence", stub_revise_record)
+        if hasattr(target, "query_record_version"):
+            monkeypatch.setattr(target, "query_record_version", stub_query_record_version)
+        if hasattr(target, "query_record_history"):
+            monkeypatch.setattr(target, "query_record_history", stub_query_record_history)
+        if hasattr(target, "create_access_request"):
+            monkeypatch.setattr(target, "create_access_request", stub_create_access_request)
+        if hasattr(target, "approve_access_request"):
+            monkeypatch.setattr(target, "approve_access_request", stub_approve_access_request)
+        if hasattr(target, "reject_access_request"):
+            monkeypatch.setattr(target, "reject_access_request", stub_reject_access_request)
+        if hasattr(target, "query_access_request"):
+            monkeypatch.setattr(target, "query_access_request", stub_query_access_request)
+        if hasattr(target, "query_access_request_history"):
+            monkeypatch.setattr(
+                target, "query_access_request_history", stub_query_access_request_history
+            )
 
-    # 暴露 stats 供测试断言
+    # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]
+    app.state.chain_store = chain_store
 
     with TestClient(app) as c:
         yield c

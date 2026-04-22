@@ -22,9 +22,29 @@
       <el-table-column prop="content_hash" label="内容哈希" min-width="200" show-overflow-tooltip />
       <el-table-column prop="tx_id" label="最新TxID" min-width="200" show-overflow-tooltip />
       <el-table-column prop="created_at" label="创建时间" width="160" />
-      <el-table-column label="操作" width="110" fixed="right">
+      <el-table-column label="文件" width="160">
+        <template #default="{ row }">
+          <template v-if="row.has_file">
+            <el-tag size="small" type="success">链上哈希 ✓</el-tag>
+            <el-tag
+              v-if="verifiedIds.has(row.id)"
+              size="small"
+              type="success"
+              style="margin-left: 4px"
+            >完整性 ✓</el-tag>
+          </template>
+          <span v-else class="text-muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="openHistory(row)">版本链</el-button>
+          <el-button
+            v-if="row.has_file"
+            size="small"
+            type="success"
+            @click="downloadFile(row)"
+          >下载</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -77,6 +97,33 @@ const records = ref([]);
 const historyVisible = ref(false);
 const historyLoading = ref(false);
 const chainHistory = ref(null);
+const verifiedIds = ref(new Set());
+
+async function downloadFile(row) {
+  try {
+    const resp = await http.get(`/records/${row.id}/download`, {
+      responseType: "blob",
+    });
+    const blob = new Blob([resp.data], {
+      type: row.file_mime || "application/octet-stream",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = row.file_name || `record-${row.id}.bin`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    verifiedIds.value.add(row.id);
+    verifiedIds.value = new Set(verifiedIds.value);
+    ElMessage.success(
+      `下载成功，链上哈希已通过校验（${row.content_hash?.slice(0, 12)}…）`
+    );
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || "下载失败，可能是文件完整性校验未通过");
+  }
+}
 
 async function fetchData() {
   loading.value = true;

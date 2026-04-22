@@ -37,6 +37,13 @@ class MedicalRecord(Base):
     previous_tx_id = Column(String(128), nullable=True)
     updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
+    # 迭代 4 新增：链下加密文件元数据（链上仅存 content_hash）
+    file_name = Column(String(255), nullable=True)
+    file_mime = Column(String(128), nullable=True)
+    file_size = Column(Integer, nullable=True)        # 明文字节数
+    file_path = Column(String(512), nullable=True)    # 密文落盘位置（相对 STORAGE_DIR）
+    file_nonce_b64 = Column(String(64), nullable=True)
+    file_tag_b64 = Column(String(64), nullable=True)
 
 
 class AccessRequest(Base):

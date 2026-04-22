@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS medical_records (
   version INT NOT NULL DEFAULT 1,
   previous_tx_id VARCHAR(128) NULL,
   updated_at DATETIME NULL,
+  file_name VARCHAR(255) NULL,
+  file_mime VARCHAR(128) NULL,
+  file_size INT NULL,
+  file_path VARCHAR(512) NULL,
+  file_nonce_b64 VARCHAR(64) NULL,
+  file_tag_b64 VARCHAR(64) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_record_patient FOREIGN KEY (patient_id) REFERENCES users(id),
   CONSTRAINT fk_record_uploader FOREIGN KEY (uploader_hospital_id) REFERENCES users(id)
@@ -40,6 +46,13 @@ CREATE TABLE IF NOT EXISTS medical_records (
 --   ALTER TABLE medical_records ADD COLUMN version INT NOT NULL DEFAULT 1;
 --   ALTER TABLE medical_records ADD COLUMN previous_tx_id VARCHAR(128) NULL;
 --   ALTER TABLE medical_records ADD COLUMN updated_at DATETIME NULL;
+-- 迭代 4 新增列。若升级旧库请手动执行：
+--   ALTER TABLE medical_records ADD COLUMN file_name VARCHAR(255) NULL;
+--   ALTER TABLE medical_records ADD COLUMN file_mime VARCHAR(128) NULL;
+--   ALTER TABLE medical_records ADD COLUMN file_size INT NULL;
+--   ALTER TABLE medical_records ADD COLUMN file_path VARCHAR(512) NULL;
+--   ALTER TABLE medical_records ADD COLUMN file_nonce_b64 VARCHAR(64) NULL;
+--   ALTER TABLE medical_records ADD COLUMN file_tag_b64 VARCHAR(64) NULL;
 
 CREATE TABLE IF NOT EXISTS access_requests (
   id INT PRIMARY KEY AUTO_INCREMENT,

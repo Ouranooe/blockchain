@@ -71,6 +71,19 @@ class MedicalRecordItem(BaseModel):
     created_at: datetime
     can_view_content: bool = False
     content: Optional[str] = None
+    # 迭代 4：文件元数据
+    has_file: bool = False
+    file_name: Optional[str] = None
+    file_mime: Optional[str] = None
+    file_size: Optional[int] = None
+
+
+class FileVerifyResult(BaseModel):
+    record_id: int
+    chain_hash: str
+    decrypted_hash: str
+    hash_match: bool
+    file_size: int
 
 
 class RecordVersionItem(BaseModel):

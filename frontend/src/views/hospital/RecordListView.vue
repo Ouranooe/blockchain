@@ -28,9 +28,29 @@
       </el-table-column>
       <el-table-column prop="tx_id" label="最新TxID" min-width="200" show-overflow-tooltip />
       <el-table-column prop="created_at" label="创建时间" width="160" />
-      <el-table-column label="操作" width="170" fixed="right">
+      <el-table-column label="文件" width="170">
+        <template #default="{ row }">
+          <template v-if="row.has_file">
+            <el-tag size="small" type="success">链上哈希 ✓</el-tag>
+            <el-tag
+              v-if="verifiedIds.has(row.id)"
+              size="small"
+              type="success"
+              style="margin-left: 4px"
+            >文件完整性 ✓</el-tag>
+          </template>
+          <span v-else class="text-muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="openHistory(row)">版本链</el-button>
+          <el-button
+            v-if="row.has_file && row.can_view_content"
+            size="small"
+            type="success"
+            @click="downloadFile(row)"
+          >下载</el-button>
           <el-button
             v-if="canRevise(row)"
             size="small"
@@ -115,6 +135,7 @@ import http from "../../api/http";
 
 const loading = ref(false);
 const records = ref([]);
+const verifiedIds = ref(new Set());
 
 const reviseVisible = ref(false);
 const reviseSubmitting = ref(false);
@@ -178,6 +199,34 @@ async function submitRevise() {
     ElMessage.error(error.response?.data?.detail || "修订失败");
   } finally {
     reviseSubmitting.value = false;
+  }
+}
+
+async function downloadFile(row) {
+  try {
+    const resp = await http.get(`/records/${row.id}/download`, {
+      responseType: "blob",
+    });
+    // 触发浏览器下载
+    const blob = new Blob([resp.data], {
+      type: row.file_mime || "application/octet-stream",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = row.file_name || `record-${row.id}.bin`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    verifiedIds.value.add(row.id);
+    // 强制触发响应式
+    verifiedIds.value = new Set(verifiedIds.value);
+    ElMessage.success(
+      `下载成功，链上哈希已通过校验（${row.content_hash?.slice(0, 12)}…）`
+    );
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || "下载失败，可能是文件完整性校验未通过");
   }
 }
 
