@@ -8,6 +8,7 @@ import RequestView from "../views/hospital/RequestView.vue";
 import AuthorizedView from "../views/hospital/AuthorizedView.vue";
 import MyRecordsView from "../views/patient/MyRecordsView.vue";
 import PendingApprovalsView from "../views/patient/PendingApprovalsView.vue";
+import MyAuthorizationsView from "../views/patient/MyAuthorizationsView.vue";
 import AuditView from "../views/admin/AuditView.vue";
 
 function getUser() {
@@ -63,6 +64,11 @@ const routes = [
       {
         path: "patient/reviews",
         component: PendingApprovalsView,
+        meta: { roles: ["patient"] }
+      },
+      {
+        path: "patient/authorizations",
+        component: MyAuthorizationsView,
         meta: { roles: ["patient"] }
       },
       {

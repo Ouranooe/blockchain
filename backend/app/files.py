@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
@@ -30,7 +33,7 @@ from .crypto_util import (
     sha256_of_bytes,
 )
 from .database import get_db
-from .gateway import create_record_evidence
+from .gateway import access_record_consume, create_record_evidence
 from .models import AccessRequest, MedicalRecord, User
 from .schemas import FileVerifyResult, MedicalRecordItem
 
@@ -300,6 +303,49 @@ def download_record_file(
     if not _authorize_file_access(current_user, record, db):
         raise HTTPException(status_code=403, detail="无权限下载该文件")
 
+    # 迭代 5：非本院医生下载 = 消费一次链上授权（链码内做守卫 + 扣减 remainingReads）
+    consume_tx = None
+    consume_remaining = None
+    if (
+        current_user.role == "hospital"
+        and record.uploader_hospital_id != current_user.id
+    ):
+        req = (
+            db.query(AccessRequest)
+            .filter(
+                AccessRequest.record_id == record.id,
+                AccessRequest.applicant_hospital_id == current_user.id,
+                AccessRequest.status == "APPROVED",
+            )
+            .order_by(AccessRequest.id.desc())
+            .first()
+        )
+        if not req:
+            raise HTTPException(status_code=403, detail="没有已批准的授权")
+        try:
+            result = access_record_consume(
+                hospital_name=current_user.hospital_name or current_user.username,
+                request_id=req.id,
+                accessed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except RuntimeError as exc:
+            # 链码层拒绝（过期 / 耗尽 / MSP 不匹配 / 已撤销 / 状态非 APPROVED）
+            raise HTTPException(
+                status_code=403, detail=f"链码层拒绝授权：{exc}"
+            ) from exc
+        chain_obj = (
+            result.get("result") if isinstance(result, dict) else None
+        ) or {}
+        consume_tx = result.get("txId") if isinstance(result, dict) else None
+        consume_remaining = chain_obj.get("remainingReads")
+        # 把链上扣减镜像到 DB（保证后续列表过滤一致）
+        if isinstance(consume_remaining, int):
+            req.remaining_reads = consume_remaining
+            if consume_remaining <= 0:
+                # 链上允许的最后一次消费已经完成；后续状态由 AccessRecord 自身守卫
+                pass
+            db.commit()
+
     plaintext, actual_hash = _verify_and_get_plaintext(record)
     total = len(plaintext)
 
@@ -313,6 +359,10 @@ def download_record_file(
         "X-Hash-Verified": "1",
         "Accept-Ranges": "bytes",
     }
+    if consume_tx is not None:
+        common_headers["X-Access-Tx"] = str(consume_tx)
+    if consume_remaining is not None:
+        common_headers["X-Remaining-Reads"] = str(consume_remaining)
 
     rng = _parse_range_header(request.headers.get("range"), total)
     if rng is not None:

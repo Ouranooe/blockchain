@@ -216,7 +216,7 @@ class TestAccessRequestHistory:
         client.post(
             f"/api/access-requests/{req['id']}/review",
             headers={"Authorization": f"Bearer {patient_token}"},
-            json={"decision": "APPROVED"},
+            json={"decision": "APPROVED", "duration_days": 7, "max_reads": 3},
         )
 
         # 申请方医院查看历史

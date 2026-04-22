@@ -136,6 +136,9 @@ class AccessRequestCreate(BaseModel):
 
 class AccessRequestReview(BaseModel):
     decision: str
+    # 迭代 5：APPROVED 时必填；REJECTED 忽略
+    duration_days: Optional[int] = Field(default=None, ge=1, le=365)
+    max_reads: Optional[int] = Field(default=None, ge=1, le=1000)
 
 
 class AccessRequestItem(BaseModel):
@@ -150,6 +153,20 @@ class AccessRequestItem(BaseModel):
     review_tx_id: Optional[str] = None
     created_at: datetime
     reviewed_at: Optional[datetime] = None
+    # 迭代 5：ABAC 字段
+    expires_at: Optional[datetime] = None
+    remaining_reads: Optional[int] = None
+    max_reads: Optional[int] = None
+    revoked_at: Optional[datetime] = None
+    revoke_tx_id: Optional[str] = None
+
+
+class AccessConsumeResult(BaseModel):
+    request_id: int
+    record_id: int
+    remaining_reads: int
+    reads_used: int
+    tx_id: Optional[str] = None
 
 
 class AuditEvent(BaseModel):

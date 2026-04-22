@@ -2,12 +2,23 @@
 
 const { Contract } = require("fabric-contract-api");
 
-class MedShareContract extends Contract {
-  // ---------------- 键设计（迭代 2 引入版本链） ----------------
-  // RECORD_{id}_v{version}  每版的完整内容
-  // RECORD_LATEST_{id}      最新版完整内容的冗余拷贝（热点索引，O(1) 读最新版）
-  // REQ_{requestId}         访问申请
+// 状态机（迭代 5 收紧）
+//                 REVOKED (patient 撤销)
+//               /
+// PENDING -> APPROVED
+//       \         \
+//        \         EXPIRED (通过 AccessRecord 时隐式检测)
+//         \
+//          REJECTED
+const ALLOWED_TRANSITIONS = {
+  PENDING: new Set(["APPROVED", "REJECTED"]),
+  APPROVED: new Set(["REVOKED"]),
+  REJECTED: new Set([]),
+  REVOKED: new Set([]),
+};
 
+class MedShareContract extends Contract {
+  // ---------------- 键设计 ----------------
   _versionKey(recordId, version) {
     return `RECORD_${recordId}_v${version}`;
   }
@@ -17,7 +28,6 @@ class MedShareContract extends Contract {
   }
 
   _recordKey(recordId) {
-    // 向后兼容：原 _recordKey 被等价为指向最新版的 LATEST 键
     return this._latestKey(recordId);
   }
 
@@ -37,8 +47,37 @@ class MedShareContract extends Contract {
     await ctx.stub.putState(key, Buffer.from(JSON.stringify(value)));
   }
 
-  // ---------------- 迭代 3：Fabric 原生历史查询 ----------------
+  // ---------------- 时间戳与身份辅助（迭代 5） ----------------
+  _txTimestampSeconds(ctx) {
+    try {
+      const ts = ctx.stub.getTxTimestamp();
+      if (!ts) return Math.floor(Date.now() / 1000);
+      const sec =
+        typeof ts.seconds === "object" && ts.seconds !== null
+          ? Number(ts.seconds.low || 0) + Number(ts.seconds.high || 0) * 2 ** 32
+          : Number(ts.seconds || 0);
+      return Number.isFinite(sec) && sec > 0
+        ? sec
+        : Math.floor(Date.now() / 1000);
+    } catch (_e) {
+      return Math.floor(Date.now() / 1000);
+    }
+  }
 
+  _callerMsp(ctx) {
+    try {
+      if (ctx.clientIdentity && typeof ctx.clientIdentity.getMSPID === "function") {
+        return ctx.clientIdentity.getMSPID() || "";
+      }
+    } catch (_e) {}
+    return "";
+  }
+
+  _isoFromSeconds(sec) {
+    return new Date(sec * 1000).toISOString();
+  }
+
+  // ---------------- 历史迭代方法 ----------------
   _formatTimestamp(ts) {
     if (!ts) return null;
     const secondsField = ts.seconds;
@@ -72,7 +111,7 @@ class MedShareContract extends Contract {
             txId: v.txId || v.tx_id || "",
             timestamp: this._formatTimestamp(v.timestamp),
             isDelete: Boolean(v.isDelete || v.is_delete),
-            value: parsed
+            value: parsed,
           });
         }
         if (!res || res.done) break;
@@ -82,7 +121,6 @@ class MedShareContract extends Contract {
         await iterator.close();
       }
     }
-    // 按时间倒序（最近的在前）
     entries.sort((a, b) => {
       if (!a.timestamp) return 1;
       if (!b.timestamp) return -1;
@@ -108,8 +146,7 @@ class MedShareContract extends Contract {
     return JSON.stringify(entries);
   }
 
-  // ---------------- 病历版本链 ----------------
-
+  // ---------------- 病历版本链（沿用迭代 2 / 3） ----------------
   async CreateMedicalRecordEvidence(
     ctx,
     recordId,
@@ -134,7 +171,7 @@ class MedShareContract extends Contract {
       previousTxId: "",
       createdAt,
       updatedAt: createdAt,
-      txId: ctx.stub.getTxID()
+      txId: ctx.stub.getTxID(),
     };
 
     await this._putStateAsObject(ctx, this._versionKey(recordId, 1), evidence);
@@ -160,7 +197,7 @@ class MedShareContract extends Contract {
       previousTxId: latest.txId,
       createdAt: latest.createdAt,
       updatedAt,
-      txId: ctx.stub.getTxID()
+      txId: ctx.stub.getTxID(),
     };
 
     await this._putStateAsObject(
@@ -173,7 +210,6 @@ class MedShareContract extends Contract {
   }
 
   async GetMedicalRecordEvidence(ctx, recordId) {
-    // 向后兼容：返回最新版
     return this.GetRecordLatest(ctx, recordId);
   }
 
@@ -196,13 +232,14 @@ class MedShareContract extends Contract {
     return JSON.stringify(evidence);
   }
 
-  // ---------------- 访问申请（迭代 1 保留，未改动） ----------------
+  // ---------------- 访问申请 ABAC（迭代 5 重写） ----------------
 
   async CreateAccessRequest(
     ctx,
     requestId,
     recordId,
     applicantHospital,
+    patientId,
     reasonHash,
     status,
     createdAt
@@ -218,28 +255,75 @@ class MedShareContract extends Contract {
       requestId,
       recordId,
       applicantHospital,
+      applicantMsp: this._callerMsp(ctx), // 迭代 5：绑定申请方的 MSP
+      patientId,                          // 迭代 5：记录归属患者
       reasonHash,
       status: status || "PENDING",
       createdAt,
       reviewedAt: "",
+      revokedAt: "",
+      expiresAt: "",
+      expiresAtTs: 0,
+      remainingReads: 0,
+      readsUsed: 0,
       createTxId: ctx.stub.getTxID(),
-      reviewTxId: ""
+      reviewTxId: "",
+      revokeTxId: "",
+      lastAccessTxId: "",
     };
 
     await this._putStateAsObject(ctx, key, request);
+    ctx.stub.setEvent(
+      "AccessRequestCreated",
+      Buffer.from(JSON.stringify({ requestId, recordId, applicantHospital }))
+    );
     return JSON.stringify(request);
   }
 
-  async ApproveAccessRequest(ctx, requestId, reviewedAt) {
+  async ApproveAccessRequest(ctx, requestId, reviewedAt, durationDays, maxReads) {
     const key = this._requestKey(requestId);
     const request = await this._getStateAsObject(ctx, key);
     if (!request) {
       throw new Error(`Access request ${requestId} not found`);
     }
+    if (!ALLOWED_TRANSITIONS[request.status].has("APPROVED")) {
+      throw new Error(
+        `非法状态跃迁：${request.status} → APPROVED（访问申请 ${requestId}）`
+      );
+    }
+
+    const duration = Number(durationDays || 0);
+    const reads = Number(maxReads || 0);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error("durationDays 必须为正数");
+    }
+    if (!Number.isFinite(reads) || reads <= 0) {
+      throw new Error("maxReads 必须为正数");
+    }
+
+    const nowTs = this._txTimestampSeconds(ctx);
+    const expiresAtTs = nowTs + Math.floor(duration * 86400);
+
     request.status = "APPROVED";
     request.reviewedAt = reviewedAt;
     request.reviewTxId = ctx.stub.getTxID();
+    request.expiresAtTs = expiresAtTs;
+    request.expiresAt = this._isoFromSeconds(expiresAtTs);
+    request.remainingReads = reads;
+    request.readsUsed = 0;
+
     await this._putStateAsObject(ctx, key, request);
+    ctx.stub.setEvent(
+      "AccessApproved",
+      Buffer.from(
+        JSON.stringify({
+          requestId,
+          recordId: request.recordId,
+          expiresAt: request.expiresAt,
+          remainingReads: request.remainingReads,
+        })
+      )
+    );
     return JSON.stringify(request);
   }
 
@@ -249,11 +333,116 @@ class MedShareContract extends Contract {
     if (!request) {
       throw new Error(`Access request ${requestId} not found`);
     }
+    if (!ALLOWED_TRANSITIONS[request.status].has("REJECTED")) {
+      throw new Error(
+        `非法状态跃迁：${request.status} → REJECTED（访问申请 ${requestId}）`
+      );
+    }
     request.status = "REJECTED";
     request.reviewedAt = reviewedAt;
     request.reviewTxId = ctx.stub.getTxID();
     await this._putStateAsObject(ctx, key, request);
+    ctx.stub.setEvent(
+      "AccessRejected",
+      Buffer.from(JSON.stringify({ requestId, recordId: request.recordId }))
+    );
     return JSON.stringify(request);
+  }
+
+  async RevokeAccessRequest(ctx, requestId, patientId, revokedAt) {
+    const key = this._requestKey(requestId);
+    const request = await this._getStateAsObject(ctx, key);
+    if (!request) {
+      throw new Error(`Access request ${requestId} not found`);
+    }
+    if (!ALLOWED_TRANSITIONS[request.status].has("REVOKED")) {
+      throw new Error(
+        `非法状态跃迁：${request.status} → REVOKED（访问申请 ${requestId}）`
+      );
+    }
+    if (String(request.patientId) !== String(patientId)) {
+      throw new Error("只有归属患者可以撤销授权");
+    }
+
+    request.status = "REVOKED";
+    request.revokedAt = revokedAt;
+    request.revokeTxId = ctx.stub.getTxID();
+    await this._putStateAsObject(ctx, key, request);
+    ctx.stub.setEvent(
+      "AccessRevoked",
+      Buffer.from(JSON.stringify({ requestId, recordId: request.recordId }))
+    );
+    return JSON.stringify(request);
+  }
+
+  /**
+   * 迭代 5 核心：一次"读取访问"的链上校验与计数扣减。
+   * 所有校验失败都抛错，链码层拒绝 —— 无论调用是否来自后端。
+   *
+   * 校验清单（全部需通过）：
+   *   1) 请求存在
+   *   2) status == APPROVED
+   *   3) 未过期（getTxTimestamp < expiresAtTs）
+   *   4) remainingReads > 0
+   *   5) 调用方 MSP == state.applicantMsp（防止 Org2 盗用 Org1 的授权）
+   */
+  async AccessRecord(ctx, requestId, accessedAt) {
+    const key = this._requestKey(requestId);
+    const request = await this._getStateAsObject(ctx, key);
+    if (!request) {
+      throw new Error(`Access request ${requestId} not found`);
+    }
+    if (request.status !== "APPROVED") {
+      throw new Error(
+        `授权不可用：当前状态 ${request.status}（访问申请 ${requestId}）`
+      );
+    }
+    const nowTs = this._txTimestampSeconds(ctx);
+    if (request.expiresAtTs && nowTs >= request.expiresAtTs) {
+      throw new Error(
+        `授权已过期（expiresAt: ${request.expiresAt || "-"}）`
+      );
+    }
+    if (!request.remainingReads || request.remainingReads <= 0) {
+      throw new Error("访问次数已用尽");
+    }
+    const callerMsp = this._callerMsp(ctx);
+    if (
+      request.applicantMsp &&
+      callerMsp &&
+      request.applicantMsp !== callerMsp
+    ) {
+      throw new Error(
+        `调用方 MSP (${callerMsp}) 与授权绑定 MSP (${request.applicantMsp}) 不一致`
+      );
+    }
+
+    request.remainingReads -= 1;
+    request.readsUsed = (request.readsUsed || 0) + 1;
+    request.lastAccessTxId = ctx.stub.getTxID();
+
+    await this._putStateAsObject(ctx, key, request);
+    ctx.stub.setEvent(
+      "AccessRecorded",
+      Buffer.from(
+        JSON.stringify({
+          requestId,
+          recordId: request.recordId,
+          remainingReads: request.remainingReads,
+          accessedAt,
+          callerMsp,
+          txId: ctx.stub.getTxID(),
+        })
+      )
+    );
+    return JSON.stringify({
+      requestId,
+      recordId: request.recordId,
+      remainingReads: request.remainingReads,
+      readsUsed: request.readsUsed,
+      accessedAt,
+      txId: ctx.stub.getTxID(),
+    });
   }
 
   async QueryAccessRequest(ctx, requestId) {
@@ -262,6 +451,7 @@ class MedShareContract extends Contract {
     if (!request) {
       throw new Error(`Access request ${requestId} not found`);
     }
+    // 若 APPROVED 但已过期，只做"视图"上的标记，不修改状态（状态要靠下一次 AccessRecord 才能感知到 EXPIRED 语义；这是纯粹的只读视图）
     return JSON.stringify(request);
   }
 }

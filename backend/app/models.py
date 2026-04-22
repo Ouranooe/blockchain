@@ -62,3 +62,9 @@ class AccessRequest(Base):
     review_tx_id = Column(String(128), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     reviewed_at = Column(DateTime, nullable=True)
+    # 迭代 5：ABAC 字段（真相在链上，这里缓存镜像便于查询过滤）
+    expires_at = Column(DateTime, nullable=True)
+    remaining_reads = Column(Integer, nullable=True)
+    max_reads = Column(Integer, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_tx_id = Column(String(128), nullable=True)

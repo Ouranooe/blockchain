@@ -253,15 +253,17 @@ app.get("/api/records/evidence/:recordId/version/:version", async (req, res) => 
 });
 
 app.post("/api/access-requests", async (req, res) => {
-  const { org, requestId, recordId, applicantHospital, reasonHash, status, createdAt } = req.body;
-  if (!requestId || !recordId || !applicantHospital || !reasonHash || !createdAt) {
+  const { org, requestId, recordId, applicantHospital, patientId, reasonHash, status, createdAt } = req.body;
+  if (!requestId || !recordId || !applicantHospital || !patientId || !reasonHash || !createdAt) {
     return res.status(400).json({ message: "missing required fields" });
   }
   try {
+    // 迭代 5：传入 patientId，链码记录 applicantMsp
     const result = await submit(org, "CreateAccessRequest", [
       String(requestId),
       String(recordId),
       String(applicantHospital),
+      String(patientId),
       String(reasonHash),
       String(status || "PENDING"),
       String(createdAt)
@@ -276,10 +278,55 @@ app.post("/api/access-requests", async (req, res) => {
 app.post("/api/access-requests/:requestId/approve", async (req, res) => {
   const org = req.body.org || "org1";
   const reviewedAt = req.body.reviewedAt || new Date().toISOString();
+  const durationDays = req.body.durationDays;
+  const maxReads = req.body.maxReads;
+  if (!durationDays || !maxReads) {
+    return res.status(400).json({ message: "durationDays 与 maxReads 为必填" });
+  }
   try {
+    // 迭代 5：带入有效期和次数上限
     const result = await submit(org, "ApproveAccessRequest", [
       String(req.params.requestId),
-      String(reviewedAt)
+      String(reviewedAt),
+      String(durationDays),
+      String(maxReads)
+    ]);
+    invalidateRequestCache(req.params.requestId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// 迭代 5：患者撤销已批准授权
+app.post("/api/access-requests/:requestId/revoke", async (req, res) => {
+  const org = req.body.org || "org1";
+  const patientId = req.body.patientId;
+  const revokedAt = req.body.revokedAt || new Date().toISOString();
+  if (!patientId) {
+    return res.status(400).json({ message: "patientId 为必填" });
+  }
+  try {
+    const result = await submit(org, "RevokeAccessRequest", [
+      String(req.params.requestId),
+      String(patientId),
+      String(revokedAt)
+    ]);
+    invalidateRequestCache(req.params.requestId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// 迭代 5：一次访问消费（原子校验 + 计数扣减 + 事件）
+app.post("/api/access-requests/:requestId/access", async (req, res) => {
+  const org = req.body.org || "org1";
+  const accessedAt = req.body.accessedAt || new Date().toISOString();
+  try {
+    const result = await submit(org, "AccessRecord", [
+      String(req.params.requestId),
+      String(accessedAt)
     ]);
     invalidateRequestCache(req.params.requestId);
     res.json(result);

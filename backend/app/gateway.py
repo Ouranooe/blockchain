@@ -58,6 +58,7 @@ def create_access_request(
     hospital_name: str,
     request_id: int,
     record_id: int,
+    patient_id: int,
     reason_hash: str,
     created_at: str,
 ) -> dict:
@@ -68,6 +69,7 @@ def create_access_request(
             "requestId": str(request_id),
             "recordId": str(record_id),
             "applicantHospital": hospital_name,
+            "patientId": str(patient_id),
             "reasonHash": reason_hash,
             "status": "PENDING",
             "createdAt": created_at,
@@ -75,10 +77,23 @@ def create_access_request(
     )
 
 
-def approve_access_request(*, hospital_name: str, request_id: int, reviewed_at: str) -> dict:
+def approve_access_request(
+    *,
+    hospital_name: str,
+    request_id: int,
+    reviewed_at: str,
+    duration_days: int,
+    max_reads: int,
+) -> dict:
+    """迭代 5：审批批准必须携带有效期天数与最大读取次数。"""
     return _post(
         f"/access-requests/{request_id}/approve",
-        {"org": _hospital_to_org(hospital_name), "reviewedAt": reviewed_at},
+        {
+            "org": _hospital_to_org(hospital_name),
+            "reviewedAt": reviewed_at,
+            "durationDays": int(duration_days),
+            "maxReads": int(max_reads),
+        },
     )
 
 
@@ -86,6 +101,39 @@ def reject_access_request(*, hospital_name: str, request_id: int, reviewed_at: s
     return _post(
         f"/access-requests/{request_id}/reject",
         {"org": _hospital_to_org(hospital_name), "reviewedAt": reviewed_at},
+    )
+
+
+def revoke_access_request(
+    *,
+    org_hint: str,
+    request_id: int,
+    patient_id: int,
+    revoked_at: str,
+) -> dict:
+    return _post(
+        f"/access-requests/{request_id}/revoke",
+        {
+            "org": _hospital_to_org(org_hint),
+            "patientId": str(patient_id),
+            "revokedAt": revoked_at,
+        },
+    )
+
+
+def access_record_consume(
+    *,
+    hospital_name: str,
+    request_id: int,
+    accessed_at: str,
+) -> dict:
+    """迭代 5：链上授权消费。链码会校验状态/过期/次数/MSP 并扣减 remainingReads。"""
+    return _post(
+        f"/access-requests/{request_id}/access",
+        {
+            "org": _hospital_to_org(hospital_name),
+            "accessedAt": accessed_at,
+        },
     )
 
 

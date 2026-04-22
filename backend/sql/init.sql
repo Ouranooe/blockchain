@@ -64,12 +64,23 @@ CREATE TABLE IF NOT EXISTS access_requests (
   status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
   create_tx_id VARCHAR(128) NULL,
   review_tx_id VARCHAR(128) NULL,
+  expires_at DATETIME NULL,
+  remaining_reads INT NULL,
+  max_reads INT NULL,
+  revoked_at DATETIME NULL,
+  revoke_tx_id VARCHAR(128) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   reviewed_at DATETIME NULL,
   CONSTRAINT fk_request_record FOREIGN KEY (record_id) REFERENCES medical_records(id),
   CONSTRAINT fk_request_hospital FOREIGN KEY (applicant_hospital_id) REFERENCES users(id),
   CONSTRAINT fk_request_patient FOREIGN KEY (patient_id) REFERENCES users(id)
 );
+-- 迭代 5 新增列。若升级旧库请手动执行：
+--   ALTER TABLE access_requests ADD COLUMN expires_at DATETIME NULL;
+--   ALTER TABLE access_requests ADD COLUMN remaining_reads INT NULL;
+--   ALTER TABLE access_requests ADD COLUMN max_reads INT NULL;
+--   ALTER TABLE access_requests ADD COLUMN revoked_at DATETIME NULL;
+--   ALTER TABLE access_requests ADD COLUMN revoke_tx_id VARCHAR(128) NULL;
 
 -- 注：初始种子密码仍为明文 '123456'，首次成功登录时后端会自动替换为 bcrypt 哈希
 INSERT INTO users (id, username, password, role, real_name, hospital_name, msp_org, is_active) VALUES

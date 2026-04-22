@@ -51,7 +51,8 @@ const menuMap = {
   ],
   patient: [
     { path: "/patient/records", label: "我的医疗数据" },
-    { path: "/patient/reviews", label: "待审批申请" }
+    { path: "/patient/reviews", label: "待审批申请" },
+    { path: "/patient/authorizations", label: "我的授权" }
   ],
   admin: [{ path: "/admin/audit", label: "区块链审计" }]
 };

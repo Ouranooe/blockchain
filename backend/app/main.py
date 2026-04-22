@@ -1,5 +1,5 @@
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -21,6 +21,7 @@ from .gateway import (
     query_record_version,
     reject_access_request,
     revise_record_evidence,
+    revoke_access_request,
 )
 from .models import AccessRequest, MedicalRecord, User
 from .schemas import (
@@ -96,6 +97,23 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
     )
 
 
+def _derive_status(req: AccessRequest) -> str:
+    """迭代 5：APPROVED 状态下若过期或次数耗尽，展示为 EXPIRED。
+    这只是"视图"，链上真相只有通过 AccessRecord 时的守卫才能拒绝访问。"""
+    if req.status != "APPROVED":
+        return req.status
+    now = datetime.now(timezone.utc)
+    exp = req.expires_at
+    if exp is not None:
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp <= now:
+            return "EXPIRED"
+    if req.remaining_reads is not None and req.remaining_reads <= 0:
+        return "EXHAUSTED"
+    return req.status
+
+
 def _request_to_item(req: AccessRequest, users: Dict[int, User], records: Dict[int, MedicalRecord]) -> AccessRequestItem:
     record = records.get(req.record_id)
     applicant = users.get(req.applicant_hospital_id)
@@ -107,11 +125,16 @@ def _request_to_item(req: AccessRequest, users: Dict[int, User], records: Dict[i
         applicant_hospital=applicant.hospital_name if applicant else f"hospital_{req.applicant_hospital_id}",
         patient_name=patient.real_name if patient else f"patient_{req.patient_id}",
         reason=req.reason,
-        status=req.status,
+        status=_derive_status(req),
         create_tx_id=req.create_tx_id,
         review_tx_id=req.review_tx_id,
         created_at=req.created_at,
         reviewed_at=req.reviewed_at,
+        expires_at=req.expires_at,
+        remaining_reads=req.remaining_reads,
+        max_reads=req.max_reads,
+        revoked_at=req.revoked_at,
+        revoke_tx_id=req.revoke_tx_id,
     )
 
 
@@ -134,6 +157,7 @@ def _ensure_request_on_chain(req: AccessRequest, record: MedicalRecord, applican
             hospital_name=applicant.hospital_name or applicant.username,
             request_id=req.id,
             record_id=req.record_id,
+            patient_id=req.patient_id,   # 迭代 5：链码写入 patientId
             reason_hash=reason_hash,
             created_at=_as_utc_iso(req.created_at),
         )
@@ -382,6 +406,7 @@ def submit_access_request(
             hospital_name=current_user.hospital_name or current_user.username,
             request_id=access_request.id,
             record_id=payload.record_id,
+            patient_id=record.patient_id,
             reason_hash=reason_hash,
             created_at=now_iso,
         )
@@ -395,6 +420,28 @@ def submit_access_request(
     users = _user_map(db, [access_request.applicant_hospital_id, access_request.patient_id])
     records = {record.id: record}
     return _request_to_item(access_request, users, records)
+
+
+@app.get(f"{settings.API_PREFIX}/access-requests/mine", response_model=List[AccessRequestItem])
+def list_my_access_requests(
+    current_user: User = Depends(require_role("patient")),
+    db: Session = Depends(get_db),
+):
+    """迭代 5：患者侧所有与自己相关的申请（含已批准/已撤销，便于撤销管理）。"""
+    requests = (
+        db.query(AccessRequest)
+        .filter(AccessRequest.patient_id == current_user.id)
+        .order_by(AccessRequest.created_at.desc())
+        .all()
+    )
+    user_ids = [x.applicant_hospital_id for x in requests] + [x.patient_id for x in requests]
+    record_ids = [x.record_id for x in requests]
+    users = _user_map(db, user_ids)
+    records = {
+        x.id: x
+        for x in db.query(MedicalRecord).filter(MedicalRecord.id.in_(record_ids)).all()
+    }
+    return [_request_to_item(req, users, records) for req in requests]
 
 
 @app.get(f"{settings.API_PREFIX}/access-requests/pending", response_model=List[AccessRequestItem])
@@ -454,6 +501,14 @@ def review_access_request(
 
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
+
+    if decision == "APPROVED":
+        if not payload.duration_days or not payload.max_reads:
+            raise HTTPException(
+                status_code=400,
+                detail="APPROVED 时必须指定 duration_days 与 max_reads",
+            )
+
     try:
         _ensure_request_on_chain(req, record, applicant)
         if decision == "APPROVED":
@@ -461,6 +516,8 @@ def review_access_request(
                 hospital_name=uploader.hospital_name or uploader.username,
                 request_id=req.id,
                 reviewed_at=now_iso,
+                duration_days=payload.duration_days,
+                max_reads=payload.max_reads,
             )
         else:
             chain_result = reject_access_request(
@@ -474,6 +531,10 @@ def review_access_request(
 
     req.status = decision
     req.reviewed_at = now
+    if decision == "APPROVED":
+        req.max_reads = payload.max_reads
+        req.remaining_reads = payload.max_reads
+        req.expires_at = now + timedelta(days=int(payload.duration_days))
     db.commit()
     db.refresh(req)
 
@@ -487,15 +548,21 @@ def authorized_records(
     current_user: User = Depends(require_role("hospital")),
     db: Session = Depends(get_db),
 ):
-    approved_ids = [
-        row.record_id
-        for row in db.query(AccessRequest.record_id)
+    # 迭代 5：过滤过期/耗尽/已撤销的授权（链上真相由 AccessRecord 守卫保证）
+    now = datetime.now(timezone.utc)
+    candidates = (
+        db.query(AccessRequest)
         .filter(
             AccessRequest.applicant_hospital_id == current_user.id,
             AccessRequest.status == "APPROVED",
         )
         .all()
-    ]
+    )
+    approved_ids: List[int] = []
+    for req in candidates:
+        if _derive_status(req) != "APPROVED":
+            continue
+        approved_ids.append(req.record_id)
 
     records = (
         db.query(MedicalRecord)
@@ -796,3 +863,59 @@ def access_request_history(
     return AccessRequestChainHistory(
         request_id=request_id, cache=cache_flag, entries=entries
     )
+
+
+# ---------------- 迭代 5：链上授权撤销（仅归属患者） ----------------
+
+@app.post(
+    f"{settings.API_PREFIX}/access-requests/{{request_id}}/revoke",
+    response_model=AccessRequestItem,
+)
+def revoke_access_request_api(
+    request_id: int,
+    current_user: User = Depends(require_role("patient")),
+    db: Session = Depends(get_db),
+):
+    req = (
+        db.query(AccessRequest)
+        .filter(
+            AccessRequest.id == request_id,
+            AccessRequest.patient_id == current_user.id,
+        )
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="访问申请不存在或非本人")
+    if req.status != "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"仅 APPROVED 可撤销，当前状态 {req.status}",
+        )
+
+    applicant = db.query(User).filter(User.id == req.applicant_hospital_id).first()
+    if not applicant:
+        raise HTTPException(status_code=404, detail="申请医院不存在")
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    try:
+        chain_result = revoke_access_request(
+            org_hint=applicant.hospital_name or applicant.username,
+            request_id=req.id,
+            patient_id=current_user.id,
+            revoked_at=now_iso,
+        )
+        req.revoke_tx_id = chain_result.get("txId")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    req.status = "REVOKED"
+    req.revoked_at = now
+    req.remaining_reads = 0  # 安全兜底
+    db.commit()
+    db.refresh(req)
+
+    users = _user_map(db, [req.applicant_hospital_id, req.patient_id])
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == req.record_id).first()
+    records = {record.id: record} if record else {}
+    return _request_to_item(req, users, records)
