@@ -274,6 +274,120 @@ describe("MedShareContract", () => {
     });
   });
 
+  describe("GetRecordHistory（迭代 3：Fabric 原生历史查询）", () => {
+    it("不存在的 recordId 应抛 not found", async () => {
+      await expect(
+        contract.GetRecordHistory(ctx, "404")
+      ).to.be.rejectedWith(/not found/);
+    });
+
+    it("创建 + 连续修订 3 次应返回 4 条历史，按时间倒序", async () => {
+      // v1 创建
+      ctx.stub.setTxID("tx-v1");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "hash-v1", "2026-04-22T00:00:00Z"
+      );
+      // v2
+      ctx.stub.setTxID("tx-v2");
+      await contract.UpdateMedicalRecordEvidence(
+        ctx, "1", "hash-v2", "2026-04-22T10:00:00Z"
+      );
+      // v3
+      ctx.stub.setTxID("tx-v3");
+      await contract.UpdateMedicalRecordEvidence(
+        ctx, "1", "hash-v3", "2026-04-22T11:00:00Z"
+      );
+      // v4
+      ctx.stub.setTxID("tx-v4");
+      await contract.UpdateMedicalRecordEvidence(
+        ctx, "1", "hash-v4", "2026-04-22T12:00:00Z"
+      );
+
+      const raw = await contract.GetRecordHistory(ctx, "1");
+      const history = JSON.parse(raw);
+      expect(history).to.have.lengthOf(4);
+
+      // 倒序：最近（tx-v4）在前，tx-v1 在末
+      expect(history[0].txId).to.equal("tx-v4");
+      expect(history[0].value.version).to.equal(4);
+      expect(history[0].value.dataHash).to.equal("hash-v4");
+      expect(history[0].isDelete).to.equal(false);
+
+      expect(history[3].txId).to.equal("tx-v1");
+      expect(history[3].value.version).to.equal(1);
+      expect(history[3].value.previousTxId).to.equal("");
+
+      // 每条都有 timestamp 且单调递增（倒序后前>=后）
+      for (let i = 0; i < history.length - 1; i++) {
+        expect(history[i].timestamp).to.be.a("string");
+        expect(history[i].timestamp >= history[i + 1].timestamp).to.equal(true);
+      }
+    });
+
+    it("本方法使用 LATEST 键的全量历史，而非逐版本 GetState", async () => {
+      ctx.stub.setTxID("tx-v1");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "hash-v1", "2026-04-22T00:00:00Z"
+      );
+      ctx.stub.setTxID("tx-v2");
+      await contract.UpdateMedicalRecordEvidence(
+        ctx, "1", "hash-v2", "2026-04-22T10:00:00Z"
+      );
+
+      ctx.stub.getHistoryForKey.resetHistory();
+      ctx.stub.getState.resetHistory();
+
+      await contract.GetRecordHistory(ctx, "1");
+
+      // 只调用 1 次 getHistoryForKey，且目标键就是 LATEST
+      expect(ctx.stub.getHistoryForKey.calledOnce).to.equal(true);
+      expect(ctx.stub.getHistoryForKey.firstCall.args[0]).to.equal("RECORD_LATEST_1");
+      // 不再逐版本读 GetState
+      expect(ctx.stub.getState.called).to.equal(false);
+    });
+  });
+
+  describe("GetAccessRequestHistory（迭代 3）", () => {
+    it("不存在的请求应抛 not found", async () => {
+      await expect(
+        contract.GetAccessRequestHistory(ctx, "404")
+      ).to.be.rejectedWith(/not found/);
+    });
+
+    it("创建→审批流应返回按时间倒序的 2 条历史", async () => {
+      ctx.stub.setTxID("tx-create");
+      await contract.CreateAccessRequest(
+        ctx, "10", "1", "HospitalB", "reason-h", "PENDING", "2026-04-22T00:00:00Z"
+      );
+      ctx.stub.setTxID("tx-approve");
+      await contract.ApproveAccessRequest(ctx, "10", "2026-04-22T10:00:00Z");
+
+      const raw = await contract.GetAccessRequestHistory(ctx, "10");
+      const history = JSON.parse(raw);
+      expect(history).to.have.lengthOf(2);
+
+      expect(history[0].txId).to.equal("tx-approve");
+      expect(history[0].value.status).to.equal("APPROVED");
+      expect(history[0].value.reviewTxId).to.equal("tx-approve");
+
+      expect(history[1].txId).to.equal("tx-create");
+      expect(history[1].value.status).to.equal("PENDING");
+    });
+
+    it("拒绝分支同样被记录到历史", async () => {
+      ctx.stub.setTxID("tx-create");
+      await contract.CreateAccessRequest(
+        ctx, "11", "1", "HospitalB", "reason-h", "PENDING", "2026-04-22T00:00:00Z"
+      );
+      ctx.stub.setTxID("tx-reject");
+      await contract.RejectAccessRequest(ctx, "11", "2026-04-22T10:00:00Z");
+
+      const history = JSON.parse(await contract.GetAccessRequestHistory(ctx, "11"));
+      expect(history[0].value.status).to.equal("REJECTED");
+      expect(history[1].value.status).to.equal("PENDING");
+    });
+  });
+
   describe("端到端：审批流状态机", () => {
     it("PENDING → APPROVED 后重复审批仍然成功（当前无状态守卫）", async () => {
       await contract.CreateAccessRequest(

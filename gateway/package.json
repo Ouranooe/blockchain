@@ -9,6 +9,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.0",
-    "fabric-network": "^2.2.20"
+    "fabric-network": "^2.2.20",
+    "node-cache": "^5.1.2"
   }
 }

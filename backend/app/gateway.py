@@ -118,3 +118,13 @@ def query_record_version(record_id: int, version: int) -> dict:
 
 def query_record_latest(record_id: int) -> dict:
     return _get(f"/records/evidence/{record_id}")
+
+
+# ---------- 迭代 3：Fabric 原生历史查询 ----------
+
+def query_record_history(record_id: int) -> dict:
+    return _get(f"/records/evidence/{record_id}/history")
+
+
+def query_access_request_history(request_id: int) -> dict:
+    return _get(f"/access-requests/{request_id}/history")

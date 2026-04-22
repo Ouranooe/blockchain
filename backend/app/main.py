@@ -15,22 +15,27 @@ from .gateway import (
     create_access_request,
     create_record_evidence,
     query_access_request,
+    query_access_request_history,
+    query_record_history,
     query_record_version,
     reject_access_request,
     revise_record_evidence,
 )
 from .models import AccessRequest, MedicalRecord, User
 from .schemas import (
+    AccessRequestChainHistory,
     AccessRequestCreate,
     AccessRequestItem,
     AccessRequestReview,
     AuditEvent,
+    ChainHistoryEntry,
     ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
     MedicalRecordCreate,
     MedicalRecordItem,
     MedicalRecordRevise,
+    RecordChainHistory,
     RecordHistory,
     RecordVersionItem,
     RegisterRequest,
@@ -621,6 +626,29 @@ def revise_record(
     return _record_to_item(record, users, True)
 
 
+def _authorize_record_view(
+    current_user: User, record: MedicalRecord, db: Session
+) -> bool:
+    if current_user.role == "admin":
+        return True
+    if current_user.role == "patient" and record.patient_id == current_user.id:
+        return True
+    if current_user.role == "hospital":
+        if record.uploader_hospital_id == current_user.id:
+            return True
+        approved = (
+            db.query(AccessRequest)
+            .filter(
+                AccessRequest.record_id == record.id,
+                AccessRequest.applicant_hospital_id == current_user.id,
+                AccessRequest.status == "APPROVED",
+            )
+            .first()
+        )
+        return approved is not None
+    return False
+
+
 @app.get(
     f"{settings.API_PREFIX}/records/{{record_id}}/history",
     response_model=RecordHistory,
@@ -630,54 +658,133 @@ def record_history(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """迭代 3：基于 Fabric GetHistoryForKey 构建病历版本链（保留原 schema）。"""
     record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="病历记录不存在")
 
-    # 权限：患者本人、上传医院、已获授权的医院、管理员
-    authorized = False
-    if current_user.role == "admin":
-        authorized = True
-    elif current_user.role == "patient" and record.patient_id == current_user.id:
-        authorized = True
-    elif current_user.role == "hospital":
-        if record.uploader_hospital_id == current_user.id:
-            authorized = True
-        else:
-            approved = (
-                db.query(AccessRequest)
-                .filter(
-                    AccessRequest.record_id == record_id,
-                    AccessRequest.applicant_hospital_id == current_user.id,
-                    AccessRequest.status == "APPROVED",
-                )
-                .first()
-            )
-            authorized = approved is not None
-    if not authorized:
+    if not _authorize_record_view(current_user, record, db):
         raise HTTPException(status_code=403, detail="无权限查看该病历历史")
 
-    latest_version = record.version or 1
-    versions: List[RecordVersionItem] = []
     try:
-        for v in range(1, latest_version + 1):
-            chain_payload = query_record_version(record_id, v)
-            data = chain_payload.get("result") if isinstance(chain_payload, dict) else None
-            if not isinstance(data, dict):
-                continue
-            versions.append(
-                RecordVersionItem(
-                    version=int(data.get("version", v)),
-                    data_hash=data.get("dataHash", ""),
-                    tx_id=data.get("txId", ""),
-                    previous_tx_id=data.get("previousTxId", "") or "",
-                    created_at=data.get("createdAt"),
-                    updated_at=data.get("updatedAt"),
-                )
-            )
+        chain_payload = query_record_history(record_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
+    raw_entries = chain_payload.get("result") if isinstance(chain_payload, dict) else None
+    if not isinstance(raw_entries, list):
+        raw_entries = []
+
+    # 链码返回倒序（最近在前）；版本链按正序更直观
+    ordered = sorted(
+        raw_entries,
+        key=lambda e: (e.get("value") or {}).get("version") or 0,
+    )
+
+    versions: List[RecordVersionItem] = []
+    for entry in ordered:
+        v = entry.get("value") or {}
+        if not v:
+            continue
+        versions.append(
+            RecordVersionItem(
+                version=int(v.get("version", 0) or 0),
+                data_hash=v.get("dataHash", "") or "",
+                tx_id=v.get("txId") or entry.get("txId", ""),
+                previous_tx_id=v.get("previousTxId", "") or "",
+                created_at=v.get("createdAt"),
+                updated_at=v.get("updatedAt") or entry.get("timestamp"),
+            )
+        )
+    latest_version = versions[-1].version if versions else (record.version or 1)
     return RecordHistory(
         record_id=record_id, latest_version=latest_version, versions=versions
+    )
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/{{record_id}}/chain-history",
+    response_model=RecordChainHistory,
+)
+def record_chain_history(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """迭代 3：原始链上时间线（倒序），附带网关缓存命中标记。"""
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+    if not _authorize_record_view(current_user, record, db):
+        raise HTTPException(status_code=403, detail="无权限查看该病历历史")
+
+    try:
+        chain_payload = query_record_history(record_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    raw_entries = chain_payload.get("result") if isinstance(chain_payload, dict) else None
+    if not isinstance(raw_entries, list):
+        raw_entries = []
+
+    entries: List[ChainHistoryEntry] = [
+        ChainHistoryEntry(
+            tx_id=e.get("txId", ""),
+            timestamp=e.get("timestamp"),
+            is_delete=bool(e.get("isDelete", False)),
+            value=e.get("value") if isinstance(e.get("value"), dict) else None,
+        )
+        for e in raw_entries
+    ]
+    cache_flag = str(chain_payload.get("cache", "miss")) if isinstance(chain_payload, dict) else "miss"
+    return RecordChainHistory(record_id=record_id, cache=cache_flag, entries=entries)
+
+
+@app.get(
+    f"{settings.API_PREFIX}/access-requests/{{request_id}}/history",
+    response_model=AccessRequestChainHistory,
+)
+def access_request_history(
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """迭代 3：审批流完整状态轨迹（GetAccessRequestHistory）。"""
+    req = db.query(AccessRequest).filter(AccessRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="访问申请不存在")
+
+    authorized = False
+    if current_user.role == "admin":
+        authorized = True
+    elif current_user.role == "patient" and req.patient_id == current_user.id:
+        authorized = True
+    elif current_user.role == "hospital" and (
+        req.applicant_hospital_id == current_user.id
+    ):
+        authorized = True
+    if not authorized:
+        raise HTTPException(status_code=403, detail="无权限查看该申请历史")
+
+    try:
+        chain_payload = query_access_request_history(request_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    raw_entries = chain_payload.get("result") if isinstance(chain_payload, dict) else None
+    if not isinstance(raw_entries, list):
+        raw_entries = []
+
+    entries: List[ChainHistoryEntry] = [
+        ChainHistoryEntry(
+            tx_id=e.get("txId", ""),
+            timestamp=e.get("timestamp"),
+            is_delete=bool(e.get("isDelete", False)),
+            value=e.get("value") if isinstance(e.get("value"), dict) else None,
+        )
+        for e in raw_entries
+    ]
+    cache_flag = str(chain_payload.get("cache", "miss")) if isinstance(chain_payload, dict) else "miss"
+    return AccessRequestChainHistory(
+        request_id=request_id, cache=cache_flag, entries=entries
     )

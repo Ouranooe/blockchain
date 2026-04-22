@@ -29,24 +29,34 @@
       </el-table-column>
     </el-table>
 
-    <el-drawer v-model="historyVisible" title="链上版本链" size="540px">
+    <el-drawer v-model="historyVisible" title="链上时间线" size="580px">
       <div v-if="historyLoading" v-loading="true" style="height: 80px"></div>
-      <template v-else-if="history">
+      <template v-else-if="chainHistory">
         <p class="muted">
-          病历 ID：{{ history.record_id }}，最新版本：v{{ history.latest_version }}
+          病历 ID：{{ chainHistory.record_id }}，链上 {{ chainHistory.entries.length }} 次变更
+          <el-tag
+            size="small"
+            :type="chainHistory.cache === 'hit' ? 'success' : 'info'"
+            style="margin-left: 8px"
+          >缓存：{{ chainHistory.cache === "hit" ? "命中" : "穿透" }}</el-tag>
         </p>
         <el-timeline>
           <el-timeline-item
-            v-for="v in [...history.versions].reverse()"
-            :key="v.version"
-            :type="v.version === history.latest_version ? 'primary' : 'info'"
-            :timestamp="v.updated_at || v.created_at || ''"
+            v-for="(entry, idx) in chainHistory.entries"
+            :key="entry.tx_id + idx"
+            :type="idx === 0 ? 'primary' : 'info'"
+            :timestamp="entry.timestamp || ''"
           >
-            <div><b>v{{ v.version }}</b></div>
-            <div class="mono">哈希：{{ v.data_hash }}</div>
-            <div class="mono">TxID：{{ v.tx_id }}</div>
-            <div v-if="v.previous_tx_id" class="mono">
-              上一版：{{ v.previous_tx_id }}
+            <div>
+              <b>v{{ entry.value?.version }}</b>
+              <el-tag v-if="idx === 0" size="small" type="success" style="margin-left: 6px">
+                最新
+              </el-tag>
+            </div>
+            <div class="mono">TxID：{{ entry.tx_id }}</div>
+            <div v-if="entry.value" class="mono">哈希：{{ entry.value.dataHash }}</div>
+            <div v-if="entry.value?.previousTxId" class="mono">
+              上一版 Tx：{{ entry.value.previousTxId }}
             </div>
           </el-timeline-item>
         </el-timeline>
@@ -66,7 +76,7 @@ const records = ref([]);
 
 const historyVisible = ref(false);
 const historyLoading = ref(false);
-const history = ref(null);
+const chainHistory = ref(null);
 
 async function fetchData() {
   loading.value = true;
@@ -83,12 +93,12 @@ async function fetchData() {
 async function openHistory(row) {
   historyVisible.value = true;
   historyLoading.value = true;
-  history.value = null;
+  chainHistory.value = null;
   try {
-    const { data } = await http.get(`/records/${row.id}/history`);
-    history.value = data;
+    const { data } = await http.get(`/records/${row.id}/chain-history`);
+    chainHistory.value = data;
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || "加载版本链失败");
+    ElMessage.error(error.response?.data?.detail || "加载链上时间线失败");
   } finally {
     historyLoading.value = false;
   }

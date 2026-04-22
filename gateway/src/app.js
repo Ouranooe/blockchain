@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const NodeCache = require("node-cache");
 const { Gateway, Wallets } = require("fabric-network");
 
 const app = express();
@@ -13,6 +14,27 @@ const CHANNEL_NAME = process.env.CHANNEL_NAME || "medicalchannel";
 const CHAINCODE_NAME = process.env.CHAINCODE_NAME || "medshare";
 const DISCOVERY_AS_LOCALHOST =
   (process.env.FABRIC_DISCOVERY_AS_LOCALHOST || "true").toLowerCase() === "true";
+
+// 迭代 3：链上历史查询 TTL 缓存（30s）。命中/未命中计数暴露到 /health 便于观察。
+const HISTORY_TTL_SECONDS = Number(process.env.HISTORY_CACHE_TTL || 30);
+const historyCache = new NodeCache({ stdTTL: HISTORY_TTL_SECONDS, checkperiod: 60 });
+const cacheStats = { hits: 0, misses: 0, invalidations: 0 };
+
+function cacheKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function invalidateRecordCache(recordId) {
+  if (historyCache.del(cacheKey("record-history", recordId))) {
+    cacheStats.invalidations += 1;
+  }
+}
+
+function invalidateRequestCache(requestId) {
+  if (historyCache.del(cacheKey("request-history", requestId))) {
+    cacheStats.invalidations += 1;
+  }
+}
 
 const orgConfigs = {
   org1: {
@@ -111,7 +133,19 @@ async function evaluate(org, fnName, args) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+  const total = cacheStats.hits + cacheStats.misses;
+  const hitRate = total > 0 ? cacheStats.hits / total : 0;
+  res.json({
+    status: "ok",
+    historyCache: {
+      ttlSeconds: HISTORY_TTL_SECONDS,
+      hits: cacheStats.hits,
+      misses: cacheStats.misses,
+      invalidations: cacheStats.invalidations,
+      hitRate: Number(hitRate.toFixed(4)),
+      size: historyCache.keys().length
+    }
+  });
 });
 
 app.post("/api/records/evidence", async (req, res) => {
@@ -155,7 +189,50 @@ app.post("/api/records/evidence/:recordId/revise", async (req, res) => {
       String(newDataHash),
       String(updatedAt)
     ]);
+    // 迭代 3：写操作后使对应缓存失效
+    invalidateRecordCache(req.params.recordId);
     res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// 迭代 3：调 Fabric GetHistoryForKey 获取病历完整历史（TTL 缓存）
+app.get("/api/records/evidence/:recordId/history", async (req, res) => {
+  const org = req.query.org || "org1";
+  const key = cacheKey("record-history", req.params.recordId);
+  const cached = historyCache.get(key);
+  if (cached) {
+    cacheStats.hits += 1;
+    return res.json({ ...cached, cache: "hit" });
+  }
+  cacheStats.misses += 1;
+  try {
+    const result = await evaluate(org, "GetRecordHistory", [
+      String(req.params.recordId)
+    ]);
+    historyCache.set(key, result);
+    res.json({ ...result, cache: "miss" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/access-requests/:requestId/history", async (req, res) => {
+  const org = req.query.org || "org1";
+  const key = cacheKey("request-history", req.params.requestId);
+  const cached = historyCache.get(key);
+  if (cached) {
+    cacheStats.hits += 1;
+    return res.json({ ...cached, cache: "hit" });
+  }
+  cacheStats.misses += 1;
+  try {
+    const result = await evaluate(org, "GetAccessRequestHistory", [
+      String(req.params.requestId)
+    ]);
+    historyCache.set(key, result);
+    res.json({ ...result, cache: "miss" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -189,6 +266,7 @@ app.post("/api/access-requests", async (req, res) => {
       String(status || "PENDING"),
       String(createdAt)
     ]);
+    invalidateRequestCache(requestId);
     res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -203,6 +281,7 @@ app.post("/api/access-requests/:requestId/approve", async (req, res) => {
       String(req.params.requestId),
       String(reviewedAt)
     ]);
+    invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -217,6 +296,7 @@ app.post("/api/access-requests/:requestId/reject", async (req, res) => {
       String(req.params.requestId),
       String(reviewedAt)
     ]);
+    invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });

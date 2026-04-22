@@ -37,6 +37,77 @@ class MedShareContract extends Contract {
     await ctx.stub.putState(key, Buffer.from(JSON.stringify(value)));
   }
 
+  // ---------------- 迭代 3：Fabric 原生历史查询 ----------------
+
+  _formatTimestamp(ts) {
+    if (!ts) return null;
+    const secondsField = ts.seconds;
+    const seconds =
+      typeof secondsField === "object" && secondsField !== null
+        ? Number(secondsField.low || 0)
+        : Number(secondsField || 0);
+    const nanos = Number(ts.nanos || 0);
+    if (!seconds && !nanos) return null;
+    const ms = seconds * 1000 + Math.floor(nanos / 1e6);
+    return new Date(ms).toISOString();
+  }
+
+  async _collectHistory(ctx, key) {
+    const iterator = await ctx.stub.getHistoryForKey(key);
+    const entries = [];
+    try {
+      while (true) {
+        const res = await iterator.next();
+        if (res && res.value) {
+          const v = res.value;
+          let parsed = null;
+          if (v.value && v.value.length > 0) {
+            try {
+              parsed = JSON.parse(v.value.toString("utf8"));
+            } catch (_err) {
+              parsed = v.value.toString("utf8");
+            }
+          }
+          entries.push({
+            txId: v.txId || v.tx_id || "",
+            timestamp: this._formatTimestamp(v.timestamp),
+            isDelete: Boolean(v.isDelete || v.is_delete),
+            value: parsed
+          });
+        }
+        if (!res || res.done) break;
+      }
+    } finally {
+      if (iterator && typeof iterator.close === "function") {
+        await iterator.close();
+      }
+    }
+    // 按时间倒序（最近的在前）
+    entries.sort((a, b) => {
+      if (!a.timestamp) return 1;
+      if (!b.timestamp) return -1;
+      if (a.timestamp === b.timestamp) return 0;
+      return a.timestamp < b.timestamp ? 1 : -1;
+    });
+    return entries;
+  }
+
+  async GetRecordHistory(ctx, recordId) {
+    const entries = await this._collectHistory(ctx, this._latestKey(recordId));
+    if (entries.length === 0) {
+      throw new Error(`Record evidence ${recordId} not found`);
+    }
+    return JSON.stringify(entries);
+  }
+
+  async GetAccessRequestHistory(ctx, requestId) {
+    const entries = await this._collectHistory(ctx, this._requestKey(requestId));
+    if (entries.length === 0) {
+      throw new Error(`Access request ${requestId} not found`);
+    }
+    return JSON.stringify(entries);
+  }
+
   // ---------------- 病历版本链 ----------------
 
   async CreateMedicalRecordEvidence(

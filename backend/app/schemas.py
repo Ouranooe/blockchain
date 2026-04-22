@@ -92,6 +92,30 @@ class RecordHistory(BaseModel):
     versions: list[RecordVersionItem]
 
 
+class ChainHistoryEntry(BaseModel):
+    """迭代 3：Fabric GetHistoryForKey 的单条历史（倒序，最近在前）。"""
+
+    tx_id: str
+    timestamp: Optional[str] = None
+    is_delete: bool = False
+    # 解析后的业务对象（病历或申请的某一版快照）
+    value: Optional[dict] = None
+
+
+class RecordChainHistory(BaseModel):
+    """迭代 3：病历链上全量历史（源自 GetHistoryForKey）。"""
+
+    record_id: int
+    cache: str = "miss"  # hit / miss（取自网关）
+    entries: list[ChainHistoryEntry]
+
+
+class AccessRequestChainHistory(BaseModel):
+    request_id: int
+    cache: str = "miss"
+    entries: list[ChainHistoryEntry]
+
+
 class AccessRequestCreate(BaseModel):
     record_id: int
     reason: str = Field(min_length=1)
