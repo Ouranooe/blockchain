@@ -82,10 +82,11 @@ pushd "${SAMPLES_DIR}/test-network" >/dev/null
 echo "[fabric-bootstrap] stopping old network (if exists)..."
 ./network.sh down || true
 
-echo "[fabric-bootstrap] starting network and channel..."
-./network.sh up createChannel -ca -c "${CHANNEL_NAME}"
+echo "[fabric-bootstrap] starting network and channel (CouchDB state DB)..."
+# 迭代 7：-s couchdb 让 peer 世界状态库使用 CouchDB，启用富查询
+./network.sh up createChannel -ca -c "${CHANNEL_NAME}" -s couchdb
 
-echo "[fabric-bootstrap] deploying chaincode..."
+echo "[fabric-bootstrap] deploying chaincode (含 CouchDB 索引 META-INF)..."
 ./network.sh deployCC -c "${CHANNEL_NAME}" -ccn "${CHAINCODE_NAME}" -ccp "${CHAINCODE_PATH_RUN}" -ccl javascript
 
 echo "[fabric-bootstrap] patching connection profiles for docker gateway..."

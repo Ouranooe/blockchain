@@ -361,6 +361,83 @@ app.get("/api/access-requests/:requestId", async (req, res) => {
   }
 });
 
+// 迭代 7：CouchDB 富查询（带 30s TTL 缓存）
+const richCache = new NodeCache({ stdTTL: HISTORY_TTL_SECONDS, checkperiod: 60 });
+const richStats = { hits: 0, misses: 0 };
+
+function richKey(name, params) {
+  return `rich:${name}:${JSON.stringify(params)}`;
+}
+
+async function _servePagedQuery(org, fnName, args, params, res) {
+  const key = richKey(fnName, { org, ...params });
+  const cached = richCache.get(key);
+  if (cached) {
+    richStats.hits += 1;
+    return res.json({ ...cached, cache: "hit" });
+  }
+  richStats.misses += 1;
+  try {
+    const result = await evaluate(org, fnName, args);
+    richCache.set(key, result);
+    res.json({ ...result, cache: "miss" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+app.get("/api/records/query/by-hospital", async (req, res) => {
+  const org = req.query.org || "org1";
+  const uploaderHospital = String(req.query.uploaderHospital || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  if (!uploaderHospital) {
+    return res.status(400).json({ message: "uploaderHospital 必填" });
+  }
+  await _servePagedQuery(
+    org,
+    "QueryRecordsByHospital",
+    [uploaderHospital, pageSize, bookmark],
+    { uploaderHospital, pageSize, bookmark },
+    res
+  );
+});
+
+app.get("/api/records/query/by-date", async (req, res) => {
+  const org = req.query.org || "org1";
+  const from = String(req.query.from || "");
+  const to = String(req.query.to || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  if (!from || !to) {
+    return res.status(400).json({ message: "from / to 必填（ISO8601）" });
+  }
+  await _servePagedQuery(
+    org,
+    "QueryRecordsByDateRange",
+    [from, to, pageSize, bookmark],
+    { from, to, pageSize, bookmark },
+    res
+  );
+});
+
+app.get("/api/access-requests/query/pending-for-patient", async (req, res) => {
+  const org = req.query.org || "org1";
+  const patientId = String(req.query.patientId || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  if (!patientId) {
+    return res.status(400).json({ message: "patientId 必填" });
+  }
+  await _servePagedQuery(
+    org,
+    "QueryPendingRequestsForPatient",
+    [patientId, pageSize, bookmark],
+    { patientId, pageSize, bookmark },
+    res
+  );
+});
+
 // ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------
 //
 // 设计：

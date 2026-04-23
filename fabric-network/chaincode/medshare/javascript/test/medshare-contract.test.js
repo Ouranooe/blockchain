@@ -40,8 +40,12 @@ describe("MedShareContract", () => {
       expect(evidence.previousTxId).to.equal("");
       expect(evidence.txId).to.equal("tx-test-0001");
 
+      // 迭代 7：LATEST 带 isLatest:true 标志；版本化键不带
       expect(readState(ctx, "RECORD_1_v1")).to.deep.equal(evidence);
-      expect(readState(ctx, "RECORD_LATEST_1")).to.deep.equal(evidence);
+      expect(readState(ctx, "RECORD_LATEST_1")).to.deep.equal({
+        ...evidence,
+        isLatest: true,
+      });
     });
 
     it("重复创建同一 recordId 应抛错", async () => {
@@ -505,6 +509,143 @@ describe("MedShareContract", () => {
       expect(names).to.include("AccessApproved");
       expect(names).to.include("AccessRecorded");
       expect(names).to.include("AccessRevoked");
+    });
+  });
+
+  describe("CouchDB 富查询（迭代 7）", () => {
+    // 种子数据：HospitalA 上传 5 条 + HospitalB 上传 3 条；各自修订 1 次（产生版本化键）
+    async function seedRecords() {
+      const now = (d) => `2026-04-${String(d).padStart(2, "0")}T00:00:00Z`;
+      let n = 1;
+      for (let i = 0; i < 5; i++) {
+        ctx.stub.setTxID(`tx-A${i}`);
+        await contract.CreateMedicalRecordEvidence(
+          ctx, String(n), "2", "HospitalA", `hA${i}`, now(i + 1)
+        );
+        if (i === 0) {
+          ctx.stub.setTxID(`tx-A${i}-v2`);
+          await contract.UpdateMedicalRecordEvidence(
+            ctx, String(n), `hA${i}-v2`, now(i + 2)
+          );
+        }
+        n += 1;
+      }
+      for (let i = 0; i < 3; i++) {
+        ctx.stub.setTxID(`tx-B${i}`);
+        await contract.CreateMedicalRecordEvidence(
+          ctx, String(n), "3", "HospitalB", `hB${i}`, now(i + 20)
+        );
+        n += 1;
+      }
+    }
+
+    it("QueryRecordsByHospital 只返回最新版 LATEST 条目（不会包含版本化键）", async () => {
+      await seedRecords();
+      const raw = await contract.QueryRecordsByHospital(ctx, "HospitalA", "20", "");
+      const out = JSON.parse(raw);
+      expect(out.records).to.have.lengthOf(5);
+      // 每条都应是 isLatest==true
+      for (const r of out.records) {
+        expect(r.isLatest).to.equal(true);
+        expect(r.uploaderHospital).to.equal("HospitalA");
+      }
+      // 第一条被修订过，应是 v2
+      const revised = out.records.find((r) => r.recordId === "1");
+      expect(revised.version).to.equal(2);
+    });
+
+    it("QueryRecordsByHospital 对另一个医院只返回自己的 3 条", async () => {
+      await seedRecords();
+      const raw = await contract.QueryRecordsByHospital(ctx, "HospitalB", "20", "");
+      const out = JSON.parse(raw);
+      expect(out.records).to.have.lengthOf(3);
+      expect(out.records.every((r) => r.uploaderHospital === "HospitalB")).to.equal(true);
+    });
+
+    it("QueryRecordsByDateRange 按 createdAt 闭区间过滤", async () => {
+      await seedRecords();
+      const raw = await contract.QueryRecordsByDateRange(
+        ctx, "2026-04-01T00:00:00Z", "2026-04-03T00:00:00Z", "20", ""
+      );
+      const out = JSON.parse(raw);
+      // HospitalA 的前 3 条创建日期 04-01..04-03
+      expect(out.records).to.have.lengthOf(3);
+      for (const r of out.records) {
+        expect(r.createdAt >= "2026-04-01T00:00:00Z").to.equal(true);
+        expect(r.createdAt <= "2026-04-03T00:00:00Z").to.equal(true);
+      }
+      // sort asc
+      for (let i = 0; i < out.records.length - 1; i++) {
+        expect(out.records[i].createdAt <= out.records[i + 1].createdAt).to.equal(true);
+      }
+    });
+
+    it("QueryPendingRequestsForPatient 只返回 PENDING 的申请", async () => {
+      // patient 2 有 2 条 PENDING，1 条 APPROVED，0 条 REJECTED
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await seedPending(contract, ctx, { reqId: "P1", patientId: "2" });
+      await seedPending(contract, ctx, { reqId: "P2", patientId: "2" });
+      await seedPending(contract, ctx, { reqId: "P3", patientId: "2" });
+      await contract.ApproveAccessRequest(ctx, "P3", "t", 7, 3);
+      // 另一个患者的申请
+      await seedPending(contract, ctx, { reqId: "X1", patientId: "3" });
+
+      const raw = await contract.QueryPendingRequestsForPatient(ctx, "2", "10", "");
+      const out = JSON.parse(raw);
+      expect(out.records).to.have.lengthOf(2);
+      expect(out.records.every((r) => r.status === "PENDING")).to.equal(true);
+      expect(out.records.every((r) => r.patientId === "2")).to.equal(true);
+    });
+
+    it("分页 1000 条记录：按 50/页 遍历完成，无丢失无重复", async () => {
+      // 种 1000 条 HospitalA 的病历
+      for (let i = 0; i < 1000; i++) {
+        ctx.stub.setTxID(`tx-${i}`);
+        await contract.CreateMedicalRecordEvidence(
+          ctx, String(i + 1), "2", "HospitalA",
+          `hash-${i}`, `2026-04-22T${String(i % 24).padStart(2, "0")}:00:00Z`
+        );
+      }
+
+      const pageSize = 50;
+      const seenIds = new Set();
+      let bookmark = "";
+      let pages = 0;
+      while (true) {
+        const raw = await contract.QueryRecordsByHospital(
+          ctx, "HospitalA", String(pageSize), bookmark
+        );
+        const out = JSON.parse(raw);
+        for (const r of out.records) {
+          const id = r.recordId;
+          expect(seenIds.has(id)).to.equal(false, `记录 ${id} 重复出现`);
+          seenIds.add(id);
+        }
+        pages += 1;
+        if (!out.bookmark) break;
+        bookmark = out.bookmark;
+        if (pages > 30) break; // 安全阈
+      }
+      expect(seenIds.size).to.equal(1000);
+      expect(pages).to.equal(Math.ceil(1000 / pageSize));
+    });
+
+    it("富查询只会命中 LATEST，不会把版本化键当成最新返回", async () => {
+      // 创建 + 修订 3 次 → 4 份数据（v1/v2/v3/v4 + LATEST）
+      ctx.stub.setTxID("c");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "9", "2", "HospitalA", "h1", "2026-04-22T00:00:00Z"
+      );
+      ctx.stub.setTxID("u2");
+      await contract.UpdateMedicalRecordEvidence(ctx, "9", "h2", "2026-04-22T10:00:00Z");
+      ctx.stub.setTxID("u3");
+      await contract.UpdateMedicalRecordEvidence(ctx, "9", "h3", "2026-04-22T11:00:00Z");
+
+      const raw = await contract.QueryRecordsByHospital(ctx, "HospitalA", "20", "");
+      const out = JSON.parse(raw);
+      expect(out.records).to.have.lengthOf(1);
+      expect(out.records[0].version).to.equal(3);
+      expect(out.records[0].isLatest).to.equal(true);
     });
   });
 

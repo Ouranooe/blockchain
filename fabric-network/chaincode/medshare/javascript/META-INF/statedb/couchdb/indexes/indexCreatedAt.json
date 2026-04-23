@@ -1,0 +1,8 @@
+{
+  "index": {
+    "fields": ["docType", "isLatest", "createdAt"]
+  },
+  "ddoc": "indexCreatedAtDoc",
+  "name": "indexCreatedAt",
+  "type": "json"
+}

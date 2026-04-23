@@ -176,3 +176,55 @@ def query_record_history(record_id: int) -> dict:
 
 def query_access_request_history(request_id: int) -> dict:
     return _get(f"/access-requests/{request_id}/history")
+
+
+# ---------- 迭代 7：CouchDB 富查询 ----------
+
+def query_records_by_hospital(
+    *,
+    uploader_hospital: str,
+    page_size: int = 20,
+    bookmark: str = "",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "uploaderHospital": uploader_hospital,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/records/query/by-hospital?{urlencode(params)}")
+
+
+def query_records_by_date(
+    *,
+    date_from: str,
+    date_to: str,
+    page_size: int = 20,
+    bookmark: str = "",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "from": date_from,
+        "to": date_to,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/records/query/by-date?{urlencode(params)}")
+
+
+def query_pending_requests_for_patient(
+    *,
+    patient_id: int,
+    page_size: int = 20,
+    bookmark: str = "",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "patientId": str(int(patient_id)),
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/access-requests/query/pending-for-patient?{urlencode(params)}")

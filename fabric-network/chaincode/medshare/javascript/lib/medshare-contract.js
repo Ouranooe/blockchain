@@ -175,7 +175,8 @@ class MedShareContract extends Contract {
     };
 
     await this._putStateAsObject(ctx, this._versionKey(recordId, 1), evidence);
-    await this._putStateAsObject(ctx, latestKey, evidence);
+    // 迭代 7：LATEST 上加 isLatest 标志，便于 CouchDB 富查询只命中最新版
+    await this._putStateAsObject(ctx, latestKey, { ...evidence, isLatest: true });
     ctx.stub.setEvent(
       "RecordCreated",
       Buffer.from(
@@ -218,7 +219,7 @@ class MedShareContract extends Contract {
       this._versionKey(recordId, newVersion),
       newEvidence
     );
-    await this._putStateAsObject(ctx, latestKey, newEvidence);
+    await this._putStateAsObject(ctx, latestKey, { ...newEvidence, isLatest: true });
     ctx.stub.setEvent(
       "RecordUpdated",
       Buffer.from(
@@ -480,6 +481,112 @@ class MedShareContract extends Contract {
     }
     // 若 APPROVED 但已过期，只做"视图"上的标记，不修改状态（状态要靠下一次 AccessRecord 才能感知到 EXPIRED 语义；这是纯粹的只读视图）
     return JSON.stringify(request);
+  }
+
+  // ---------------- 迭代 7：CouchDB 富查询 ----------------
+
+  async _iterateQuery(iterator) {
+    const out = [];
+    try {
+      while (true) {
+        const res = await iterator.next();
+        if (res && res.value) {
+          let parsed = null;
+          if (res.value.value && res.value.value.length > 0) {
+            try {
+              parsed = JSON.parse(res.value.value.toString("utf8"));
+            } catch (_e) {
+              parsed = null;
+            }
+          }
+          out.push({ key: res.value.key, value: parsed });
+        }
+        if (!res || res.done) break;
+      }
+    } finally {
+      if (iterator && typeof iterator.close === "function") {
+        await iterator.close();
+      }
+    }
+    return out;
+  }
+
+  async _richQueryPaged(ctx, selector, pageSize, bookmark, useIndex, sort) {
+    const query = { selector };
+    if (sort) query.sort = sort;
+    if (useIndex) query.use_index = useIndex;
+    const ps = Math.max(1, Math.min(1000, Number(pageSize) || 20));
+    const { iterator, metadata } = await ctx.stub.getQueryResultWithPagination(
+      JSON.stringify(query),
+      ps,
+      bookmark || ""
+    );
+    const records = await this._iterateQuery(iterator);
+    return {
+      records: records.map((r) => r.value).filter((v) => v !== null),
+      fetchedCount:
+        (metadata && (metadata.fetchedRecordsCount || metadata.fetched_records_count)) ||
+        records.length,
+      bookmark: (metadata && metadata.bookmark) || "",
+    };
+  }
+
+  /**
+   * 迭代 7：按医院（uploaderHospital）查询最新版病历。分页。
+   */
+  async QueryRecordsByHospital(ctx, uploaderHospital, pageSize, bookmark) {
+    const selector = {
+      docType: "RecordEvidence",
+      isLatest: true,
+      uploaderHospital,
+    };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexUploaderHospitalDoc", "indexUploaderHospital"]
+    );
+    return JSON.stringify(out);
+  }
+
+  /**
+   * 迭代 7：按时间范围查询最新版病历（createdAt 介于 [fromIso, toIso]）。分页。
+   */
+  async QueryRecordsByDateRange(ctx, fromIso, toIso, pageSize, bookmark) {
+    const selector = {
+      docType: "RecordEvidence",
+      isLatest: true,
+      createdAt: { $gte: String(fromIso), $lte: String(toIso) },
+    };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexCreatedAtDoc", "indexCreatedAt"],
+      [{ createdAt: "asc" }]
+    );
+    return JSON.stringify(out);
+  }
+
+  /**
+   * 迭代 7：查询某患者所有 PENDING 的访问申请。
+   */
+  async QueryPendingRequestsForPatient(ctx, patientId, pageSize, bookmark) {
+    const selector = {
+      docType: "AccessRequest",
+      patientId: String(patientId),
+      status: "PENDING",
+    };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexPatientPendingDoc", "indexPatientPending"]
+    );
+    return JSON.stringify(out);
   }
 }
 

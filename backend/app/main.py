@@ -29,8 +29,11 @@ from .gateway import (
     create_record_evidence,
     query_access_request,
     query_access_request_history,
+    query_pending_requests_for_patient,
     query_record_history,
     query_record_version,
+    query_records_by_date,
+    query_records_by_hospital,
     reject_access_request,
     revise_record_evidence,
     revoke_access_request,
@@ -43,6 +46,10 @@ from .schemas import (
     AccessRequestReview,
     AuditEvent,
     ChainHistoryEntry,
+    ChainPendingRequestBrief,
+    ChainPendingRequestPage,
+    ChainRecordBrief,
+    ChainRecordPage,
     ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
@@ -1094,6 +1101,130 @@ async def ws_notifications(
         pass
     finally:
         await bus.unsubscribe(user.id, queue)
+
+
+# ---------------- 迭代 7：CouchDB 富查询 ----------------
+
+def _record_brief(raw: dict) -> ChainRecordBrief:
+    return ChainRecordBrief(
+        record_id=str(raw.get("recordId", "")),
+        patient_id=str(raw.get("patientId", "")),
+        uploader_hospital=raw.get("uploaderHospital", ""),
+        data_hash=raw.get("dataHash", ""),
+        version=int(raw.get("version", 1) or 1),
+        tx_id=raw.get("txId", ""),
+        created_at=raw.get("createdAt"),
+        updated_at=raw.get("updatedAt"),
+    )
+
+
+def _pending_brief(raw: dict) -> ChainPendingRequestBrief:
+    return ChainPendingRequestBrief(
+        request_id=str(raw.get("requestId", "")),
+        record_id=str(raw.get("recordId", "")),
+        patient_id=str(raw.get("patientId", "")),
+        applicant_hospital=raw.get("applicantHospital", ""),
+        applicant_msp=raw.get("applicantMsp"),
+        status=raw.get("status", ""),
+        created_at=raw.get("createdAt"),
+    )
+
+
+def _chain_page_records(payload: dict) -> ChainRecordPage:
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    records = [
+        _record_brief(r) for r in (result.get("records") or []) if isinstance(r, dict)
+    ]
+    return ChainRecordPage(
+        records=records,
+        bookmark=result.get("bookmark", "") or "",
+        fetched_count=int(result.get("fetchedCount", len(records)) or len(records)),
+        cache=str(payload.get("cache", "miss") if isinstance(payload, dict) else "miss"),
+    )
+
+
+def _chain_page_requests(payload: dict) -> ChainPendingRequestPage:
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    reqs = [
+        _pending_brief(r) for r in (result.get("records") or []) if isinstance(r, dict)
+    ]
+    return ChainPendingRequestPage(
+        requests=reqs,
+        bookmark=result.get("bookmark", "") or "",
+        fetched_count=int(result.get("fetchedCount", len(reqs)) or len(reqs)),
+        cache=str(payload.get("cache", "miss") if isinstance(payload, dict) else "miss"),
+    )
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/chain/by-hospital",
+    response_model=ChainRecordPage,
+)
+def chain_records_by_hospital(
+    hospital: Optional[str] = None,
+    page_size: int = Query(20, ge=1, le=200),
+    bookmark: str = "",
+    current_user: User = Depends(get_current_user),
+):
+    """迭代 7：通过链上 CouchDB 富查询列出某医院上传的最新版病历。
+    - hospital：医院人员默认查自己；admin 必须传入 hospital 参数
+    - patient：仅 admin 可访问（患者不需要按医院查）
+    """
+    target = hospital
+    if current_user.role == "hospital" and not target:
+        target = current_user.hospital_name
+    if current_user.role not in {"admin", "hospital"}:
+        raise HTTPException(status_code=403, detail="仅 admin 与 hospital 可调用")
+    if not target:
+        raise HTTPException(status_code=400, detail="缺少 hospital 参数")
+
+    try:
+        payload = query_records_by_hospital(
+            uploader_hospital=target, page_size=page_size, bookmark=bookmark
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return _chain_page_records(payload)
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/chain/by-date",
+    response_model=ChainRecordPage,
+)
+def chain_records_by_date(
+    date_from: str = Query(..., alias="from"),
+    date_to: str = Query(..., alias="to"),
+    page_size: int = Query(20, ge=1, le=200),
+    bookmark: str = "",
+    current_user: User = Depends(require_role("admin")),
+):
+    """迭代 7：按 createdAt 闭区间查询链上所有最新版病历（admin 专属：审计/统计）。"""
+    try:
+        payload = query_records_by_date(
+            date_from=date_from, date_to=date_to, page_size=page_size, bookmark=bookmark
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return _chain_page_records(payload)
+
+
+@app.get(
+    f"{settings.API_PREFIX}/access-requests/chain/pending",
+    response_model=ChainPendingRequestPage,
+)
+def chain_pending_requests_for_me(
+    page_size: int = Query(20, ge=1, le=200),
+    bookmark: str = "",
+    current_user: User = Depends(require_role("patient")),
+):
+    """迭代 7：患者端从链上直接查询自己名下所有 PENDING 申请（摆脱 MySQL 镜像）。"""
+    try:
+        payload = query_pending_requests_for_patient(
+            patient_id=current_user.id, page_size=page_size, bookmark=bookmark
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return _chain_page_requests(payload)
 
 
 @app.get(f"{settings.API_PREFIX}/audit/events", response_model=List[Dict])

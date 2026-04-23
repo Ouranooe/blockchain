@@ -169,6 +169,43 @@ class AccessConsumeResult(BaseModel):
     tx_id: Optional[str] = None
 
 
+# ---------- 迭代 7：CouchDB 富查询返回结构 ----------
+
+class ChainRecordBrief(BaseModel):
+    record_id: str
+    patient_id: str
+    uploader_hospital: str
+    data_hash: str
+    version: int
+    tx_id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ChainRecordPage(BaseModel):
+    records: list[ChainRecordBrief]
+    bookmark: str = ""
+    fetched_count: int = 0
+    cache: str = "miss"
+
+
+class ChainPendingRequestBrief(BaseModel):
+    request_id: str
+    record_id: str
+    patient_id: str
+    applicant_hospital: str
+    applicant_msp: Optional[str] = None
+    status: str
+    created_at: Optional[str] = None
+
+
+class ChainPendingRequestPage(BaseModel):
+    requests: list[ChainPendingRequestBrief]
+    bookmark: str = ""
+    fetched_count: int = 0
+    cache: str = "miss"
+
+
 class AuditEvent(BaseModel):
     event_type: str
     business_id: int

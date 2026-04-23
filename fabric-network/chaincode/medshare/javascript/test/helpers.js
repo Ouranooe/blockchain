@@ -36,6 +36,106 @@ function makeMockContext({ txId = "tx-test-0001", existingState = {} } = {}) {
     txSeconds += 1;
   }
 
+  // --- 迭代 7：Mango selector 匹配器 ---
+  function _matchOperator(fieldValue, opObj) {
+    if (opObj === null || typeof opObj !== "object") {
+      return fieldValue === opObj;
+    }
+    for (const [op, arg] of Object.entries(opObj)) {
+      switch (op) {
+        case "$eq":
+          if (fieldValue !== arg) return false;
+          break;
+        case "$ne":
+          if (fieldValue === arg) return false;
+          break;
+        case "$gt":
+          if (!(fieldValue > arg)) return false;
+          break;
+        case "$gte":
+          if (!(fieldValue >= arg)) return false;
+          break;
+        case "$lt":
+          if (!(fieldValue < arg)) return false;
+          break;
+        case "$lte":
+          if (!(fieldValue <= arg)) return false;
+          break;
+        case "$in":
+          if (!Array.isArray(arg) || !arg.includes(fieldValue)) return false;
+          break;
+        default:
+          // 未实现算子 → 保守拒绝
+          return false;
+      }
+    }
+    return true;
+  }
+
+  function _matchSelector(obj, selector) {
+    if (!selector || typeof selector !== "object") return true;
+    for (const [k, v] of Object.entries(selector)) {
+      if (k === "$and") {
+        if (!Array.isArray(v)) return false;
+        if (!v.every((sub) => _matchSelector(obj, sub))) return false;
+        continue;
+      }
+      if (k === "$or") {
+        if (!Array.isArray(v)) return false;
+        if (!v.some((sub) => _matchSelector(obj, sub))) return false;
+        continue;
+      }
+      const fieldValue = obj == null ? undefined : obj[k];
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        if (!_matchOperator(fieldValue, v)) return false;
+      } else {
+        if (fieldValue !== v) return false;
+      }
+    }
+    return true;
+  }
+
+  function _sortResults(list, sort) {
+    if (!sort || !Array.isArray(sort)) return list;
+    const sorted = list.slice();
+    sorted.sort((a, b) => {
+      for (const rule of sort) {
+        const [field, dir] = Object.entries(rule)[0] || [];
+        if (!field) continue;
+        const av = a.value ? a.value[field] : undefined;
+        const bv = b.value ? b.value[field] : undefined;
+        if (av === bv) continue;
+        const mul = dir === "desc" ? -1 : 1;
+        return av < bv ? -1 * mul : 1 * mul;
+      }
+      return 0;
+    });
+    return sorted;
+  }
+
+  function _runRichQuery(queryString) {
+    let q;
+    try {
+      q = JSON.parse(queryString);
+    } catch {
+      return [];
+    }
+    const selector = q.selector || {};
+    const matches = [];
+    for (const [key, buf] of state.entries()) {
+      let obj;
+      try {
+        obj = JSON.parse(buf.toString("utf8"));
+      } catch {
+        continue;
+      }
+      if (_matchSelector(obj, selector)) {
+        matches.push({ key, value: obj });
+      }
+    }
+    return _sortResults(matches, q.sort);
+  }
+
   const stub = {
     _state: state,
     _events: [],
@@ -74,6 +174,50 @@ function makeMockContext({ txId = "tx-test-0001", existingState = {} } = {}) {
         close: async () => {}
       };
     }),
+    // 迭代 7：Mock CouchDB 富查询（支持 Mango selector 子集：
+    //   直接相等、$eq、$gte、$lte、$gt、$lt、$in、$and、$or）
+    getQueryResult: sinon.stub().callsFake(async (queryString) => {
+      const results = _runRichQuery(queryString);
+      let idx = 0;
+      return {
+        next: async () => {
+          if (idx >= results.length) return { value: null, done: true };
+          const v = results[idx];
+          idx += 1;
+          return {
+            value: { key: v.key, value: Buffer.from(JSON.stringify(v.value)) },
+            done: idx >= results.length
+          };
+        },
+        close: async () => {}
+      };
+    }),
+    getQueryResultWithPagination: sinon.stub().callsFake(
+      async (queryString, pageSize, bookmark) => {
+        const all = _runRichQuery(queryString);
+        const start = bookmark ? parseInt(bookmark, 10) || 0 : 0;
+        const end = Math.min(all.length, start + Number(pageSize || 20));
+        const page = all.slice(start, end);
+        let idx = 0;
+        const iterator = {
+          next: async () => {
+            if (idx >= page.length) return { value: null, done: true };
+            const v = page[idx];
+            idx += 1;
+            return {
+              value: { key: v.key, value: Buffer.from(JSON.stringify(v.value)) },
+              done: idx >= page.length
+            };
+          },
+          close: async () => {}
+        };
+        const metadata = {
+          fetchedRecordsCount: page.length,
+          bookmark: end < all.length ? String(end) : ""
+        };
+        return { iterator, metadata };
+      }
+    ),
     getTxTimestamp: sinon.stub().callsFake(() => ({
       seconds: { low: txSeconds, high: 0 },
       nanos: 0

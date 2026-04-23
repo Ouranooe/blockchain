@@ -386,6 +386,65 @@ def client(db_engine, db_session, monkeypatch):
             or latest.get("revokeTxId", ""),
         }
 
+    # 迭代 7：富查询 stubs。基于 chain_store["records"] / chain_store["requests"] 实现。
+    def _rich_paginate(items, page_size, bookmark):
+        start = int(bookmark) if bookmark else 0
+        end = min(len(items), start + max(1, int(page_size)))
+        page = items[start:end]
+        return {
+            "records": page,
+            "fetchedCount": len(page),
+            "bookmark": str(end) if end < len(items) else "",
+        }
+
+    def stub_query_records_by_hospital(**kwargs):
+        name = kwargs["uploader_hospital"]
+        # 每个 record_id 只返回最新版（列表末尾那条）
+        latest = []
+        for rid, snapshots in sorted(chain_store["records"].items()):
+            if not snapshots:
+                continue
+            snap = snapshots[-1]
+            if snap.get("uploaderHospital") == name:
+                latest.append({**snap, "isLatest": True})
+        out = _rich_paginate(
+            latest, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
+    def stub_query_records_by_date(**kwargs):
+        lo, hi = kwargs["date_from"], kwargs["date_to"]
+        latest = []
+        for rid, snapshots in sorted(chain_store["records"].items()):
+            if not snapshots:
+                continue
+            snap = snapshots[-1]
+            ca = snap.get("createdAt", "")
+            if lo <= ca <= hi:
+                latest.append({**snap, "isLatest": True})
+        latest.sort(key=lambda x: x.get("createdAt", ""))
+        out = _rich_paginate(
+            latest, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
+    def stub_query_pending_requests_for_patient(**kwargs):
+        pid = str(kwargs["patient_id"])
+        matched = []
+        for req_id, entries in sorted(chain_store["requests"].items()):
+            if not entries:
+                continue
+            snap = entries[-1]
+            if (
+                str(snap.get("patientId")) == pid
+                and snap.get("status") == "PENDING"
+            ):
+                matched.append(snap)
+        out = _rich_paginate(
+            matched, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
     def stub_query_access_request_history(request_id: int):
         rid = int(request_id)
         key = ("request-history", rid)
@@ -422,6 +481,20 @@ def client(db_engine, db_session, monkeypatch):
         if hasattr(target, "query_access_request_history"):
             monkeypatch.setattr(
                 target, "query_access_request_history", stub_query_access_request_history
+            )
+        if hasattr(target, "query_records_by_hospital"):
+            monkeypatch.setattr(
+                target, "query_records_by_hospital", stub_query_records_by_hospital
+            )
+        if hasattr(target, "query_records_by_date"):
+            monkeypatch.setattr(
+                target, "query_records_by_date", stub_query_records_by_date
+            )
+        if hasattr(target, "query_pending_requests_for_patient"):
+            monkeypatch.setattr(
+                target,
+                "query_pending_requests_for_patient",
+                stub_query_pending_requests_for_patient,
             )
 
     # 暴露 stats 与 store 供测试断言 / 篡改
