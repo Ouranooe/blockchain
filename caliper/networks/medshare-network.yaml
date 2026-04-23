@@ -1,0 +1,26 @@
+# Caliper 2.0 连接配置（Fabric 2.x Gateway 模式）
+# 运行前：cd caliper && npm i -g @hyperledger/caliper-cli@0.5
+# 拉 binding：caliper bind --caliper-bind-sut fabric:2.2
+name: MedShare Caliper Network
+version: "2.0.0"
+
+caliper:
+  blockchain: fabric
+
+channels:
+  - channelName: medicalchannel
+    contracts:
+      - id: medshare
+
+organizations:
+  - mspid: Org1MSP
+    identities:
+      certificates:
+        - name: admin.org1
+          clientPrivateKey:
+            path: ../fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/keystore/priv_sk
+          clientSignedCert:
+            path: ../fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/signcerts/cert.pem
+    connectionProfile:
+      path: ../fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/connection-org1.json
+      discover: true

@@ -1,0 +1,26 @@
+# 迭代 8：Prometheus 抓取配置
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: medshare-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: backend
+          env: prod
+
+  - job_name: medshare-gateway
+    metrics_path: /health
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["gateway:3000"]
+        labels:
+          service: gateway
+          env: prod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

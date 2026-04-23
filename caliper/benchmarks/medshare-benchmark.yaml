@@ -1,0 +1,72 @@
+# Caliper 基准测试：三场景覆盖链上查询、写入、混合读写
+# 运行：caliper launch manager \
+#         --caliper-workspace . \
+#         --caliper-benchconfig caliper/benchmarks/medshare-benchmark.yaml \
+#         --caliper-networkconfig caliper/networks/medshare-network.yaml
+
+test:
+  name: MedShare Chain Performance Benchmark
+  description: 纯查询 / 纯上链 / 混合读写 三场景
+  workers:
+    type: local
+    number: 4
+
+  rounds:
+    # 场景 2：纯查询（目标 TPS ≥ 200）
+    - label: query-records
+      description: "GetRecordLatest / GetRecordHistory 混合只读调用"
+      txDuration: 60
+      rateControl:
+        type: fixed-load
+        opts:
+          transactionLoad: 50
+      workload:
+        module: ./caliper/workload/query-records.js
+        arguments:
+          seedRecords: 200
+
+    # 场景 1：纯上链（目标 TPS ≥ 30，受 Fabric 出块影响）
+    - label: create-records
+      description: "CreateMedicalRecordEvidence 批量写"
+      txNumber: 500
+      rateControl:
+        type: fixed-rate
+        opts:
+          tps: 30
+      workload:
+        module: ./caliper/workload/create-records.js
+        arguments:
+          hospital: HospitalA
+          patientId: "2"
+
+    # 场景 3：混合读写（80% 查 + 20% 写）
+    - label: mixed-rw
+      description: "真实业务比例：80% 读 / 20% 写"
+      txDuration: 90
+      rateControl:
+        type: fixed-load
+        opts:
+          transactionLoad: 30
+      workload:
+        module: ./caliper/workload/mixed-rw.js
+        arguments:
+          hospital: HospitalA
+          patientId: "2"
+          readRatio: 0.8
+
+observer:
+  type: local
+  interval: 5
+
+monitors:
+  resource:
+    - module: process
+      options:
+        interval: 5
+    - module: docker
+      options:
+        interval: 5
+        containers:
+          - peer0.org1.example.com
+          - peer0.org2.example.com
+          - orderer.example.com

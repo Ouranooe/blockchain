@@ -9,6 +9,7 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -23,6 +24,7 @@ from .config import settings
 from .database import Base, engine, get_db
 from .events import AuditEvent as AuditPayload, bus
 from .files import router as files_router
+from .metrics import CHAIN_CALLS, WS_CONNECTIONS, install_metrics
 from .gateway import (
     approve_access_request,
     create_access_request,
@@ -67,6 +69,28 @@ from .security import hash_password, is_hashed, verify_password
 
 app = FastAPI(title=settings.APP_NAME)
 
+# 迭代 8：限流（敏感接口防暴力破解 / 注册刷库）
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from fastapi.responses import JSONResponse
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[],
+    enabled=settings.RATE_LIMIT_ENABLED,
+)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request, exc):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"请求过于频繁，请稍后再试：{exc.detail}"},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -74,6 +98,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 迭代 8：Prometheus /metrics（放在 CORS 之后、路由注册之前）
+install_metrics(app)
 
 
 @app.on_event("startup")
@@ -215,8 +242,27 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/health/live", include_in_schema=False)
+def liveness():
+    """迭代 8：K8s liveness 探针 —— 进程在跑即 200。"""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def readiness(db: Session = Depends(get_db)):
+    """迭代 8：readiness 探针 —— DB 可读才 200。"""
+    try:
+        from sqlalchemy import text
+
+        db.execute(text("SELECT 1"))
+        return {"status": "ready"}
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=503, detail=f"db_unreachable: {exc}")
+
+
 @app.post(f"{settings.API_PREFIX}/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
     if not user or not verify_password(payload.password, user.password):
         raise HTTPException(
@@ -235,7 +281,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.post(f"{settings.API_PREFIX}/auth/register", response_model=UserInfo)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_REGISTER)
+def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
     # 自助注册目前仅开放患者角色；医院/管理员由管理员线下创建
     if payload.role != "patient":
         raise HTTPException(status_code=400, detail="自助注册仅支持 patient 角色")

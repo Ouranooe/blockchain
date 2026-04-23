@@ -18,6 +18,14 @@ class Settings:
     GATEWAY_URL = os.getenv("GATEWAY_URL", "http://gateway:3000/api")
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 
+    # 迭代 8：限流开关（test 环境默认关闭；生产强烈建议开启）
+    RATE_LIMIT_ENABLED = os.getenv(
+        "RATE_LIMIT_ENABLED",
+        "0" if os.getenv("ENVIRONMENT", "development").lower() == "test" else "1",
+    ) == "1"
+    RATE_LIMIT_LOGIN = os.getenv("RATE_LIMIT_LOGIN", "10/minute")
+    RATE_LIMIT_REGISTER = os.getenv("RATE_LIMIT_REGISTER", "20/minute")
+
     # 迭代 4：文件加密与本地存储
     FILE_KEY_BASE64 = os.getenv("MEDSHARE_FILE_KEY_BASE64")  # base64(32 bytes)
     STORAGE_DIR = os.getenv(

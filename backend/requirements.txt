@@ -5,3 +5,6 @@ pymysql==1.1.1
 python-jose[cryptography]==3.3.0
 requests==2.32.3
 passlib[bcrypt]==1.7.4
+# 迭代 8：监控 + 限流
+prometheus-client==0.21.0
+slowapi==0.1.9

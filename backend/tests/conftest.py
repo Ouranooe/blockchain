@@ -570,6 +570,71 @@ def make_user(db_session):
 
 
 @pytest.fixture
+def client_with_limiter(db_engine, db_session, monkeypatch):
+    """迭代 8：在测试进程里临时开启限流（验证 429）。"""
+    from app import main as _main
+
+    original = _main.limiter.enabled
+    _main.limiter.enabled = True
+    # 把限流窗口内的计数清零（避免前序测试污染）
+    try:
+        if hasattr(_main.limiter, "_storage") and hasattr(
+            _main.limiter._storage, "storage"
+        ):
+            _main.limiter._storage.storage.clear()
+    except Exception:
+        pass
+    # 复用 client fixture 的构造逻辑：直接 call it
+    for c in _inner_client(db_engine, monkeypatch):
+        yield c
+        break
+    _main.limiter.enabled = original
+
+
+def _inner_client(db_engine, monkeypatch):
+    # 同 client fixture 逻辑的简化版（避免递归调用 client 装饰器）
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import sessionmaker
+
+    TestingSession = sessionmaker(bind=db_engine, autocommit=False, autoflush=False)
+
+    def override_get_db():
+        s = TestingSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    # 重置事件总线
+    from app import events as _events
+    _events.bus._ws_subscribers = {}
+    _events.bus._admin_subscribers = set()
+    _events.bus._audit_queue = None
+    _events.bus._lock = None
+    _events.bus._flusher_task = None
+    _events.bus._main_loop = None
+    _events.bus.stats = {"emitted": 0, "broadcast": 0, "persisted": 0}
+
+    # 为该 client 也打桩 chain calls（最小集；限流测试不触链）
+    def _stub_tx(prefix):
+        def _inner(**kwargs):
+            return {"txId": f"{prefix}-stub-tx"}
+        return _inner
+
+    for target in (gateway_module, main_module, files_module):
+        if hasattr(target, "create_record_evidence"):
+            monkeypatch.setattr(target, "create_record_evidence", _stub_tx("rec"))
+        if hasattr(target, "create_access_request"):
+            monkeypatch.setattr(target, "create_access_request", _stub_tx("req"))
+
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
 def login_token(client):
     """工厂 fixture：登录并返回 Bearer token。"""
 

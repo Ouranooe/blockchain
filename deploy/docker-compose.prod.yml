@@ -1,0 +1,136 @@
+version: "3.8"
+
+# 迭代 8 生产化部署（docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d）
+#   - 在基础 compose 之上叠加：资源限制 / 重启策略 / 健康检查 / Nginx 反代 + HTTPS
+#   - Prometheus + Grafana 观测
+#   - MySQL 备份容器
+#
+# 前置条件：
+#   1. 已执行 bash deploy/gen-self-signed-cert.sh 生成 ./deploy/certs/{server.crt,server.key}
+#   2. ./deploy/.env.prod 已准备（SECRET_KEY / MEDSHARE_FILE_KEY_BASE64 等）
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: medshare-nginx
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  backend:
+    env_file:
+      - .env.prod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready').read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 6
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1024M
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers 4 --no-access-log --log-level info
+
+  gateway:
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 6
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  mysql:
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+
+  mysql-backup:
+    image: mysql:8.0
+    container_name: medshare-mysql-backup
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./backup:/backup
+      - ./mysql-backup.sh:/usr/local/bin/mysql-backup.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while true; do /usr/local/bin/mysql-backup.sh; sleep 86400; done"]
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=medshare
+      - MYSQL_PASSWORD=medshare123
+      - MYSQL_DB=medshare
+      - BACKUP_DIR=/backup
+      - RETENTION_DAYS=7
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: medshare-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: medshare-grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=changeme
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+
+volumes:
+  grafana-data:
