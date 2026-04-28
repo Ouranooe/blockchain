@@ -1,0 +1,2887 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MedShare — System Design / Editorial Edition</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..700&family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* The four-color editorial system */
+  --paper:   #EFEAE0;   /* warm journal stock */
+  --ink:     #1A1612;   /* warm black, primary type */
+  --pencil:  #8B847A;   /* warm grey, secondary */
+  --specimen:#7A2715;   /* oxblood, single accent */
+
+  /* Hairline opacities derived from ink */
+  --rule:        rgba(26, 22, 18, 0.22);
+  --rule-faint:  rgba(26, 22, 18, 0.08);
+  --rule-strong: rgba(26, 22, 18, 0.55);
+  --paper-2:     rgba(26, 22, 18, 0.04);
+
+  --serif:      'Fraunces', 'Noto Serif SC', Georgia, serif;
+  --serif-zh:   'Noto Serif SC', 'Songti SC', 'STSong', serif;
+  --sans:       'IBM Plex Sans', 'Noto Sans SC', -apple-system, sans-serif;
+  --sans-zh:    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mono:       'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: #1F1C18;
+  color: var(--ink);
+  font-family: var(--sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+/* ---------------- STAGE & DECK FRAME ---------------- */
+.stage {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    radial-gradient(1200px 700px at 50% 50%, #2a2620 0%, #1a1714 70%);
+}
+
+.deck {
+  position: relative;
+  width: 1440px; height: 900px;
+  background: var(--paper);
+  box-shadow:
+    0 60px 120px rgba(0,0,0,0.55),
+    0 16px 30px rgba(0,0,0,0.30),
+    0 1px 0 rgba(255,255,255,0.04) inset;
+  transform-origin: center center;
+}
+
+/* paper grain — extremely subtle */
+.deck::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.10  0 0 0 0 0.08  0 0 0 0 0.07  0 0 0 0.05 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+}
+
+/* page guide — quarter ticks at edges (editorial) */
+.deck::after {
+  content: ''; position: absolute; inset: 24px; pointer-events: none; z-index: 1;
+  border: 0.5px solid var(--rule-faint);
+}
+
+/* ---------------- SLIDES ---------------- */
+.slide {
+  position: absolute; inset: 0;
+  padding: 56px 84px;
+  display: flex; flex-direction: column;
+  opacity: 0;
+  transform: translateX(8px);
+  transition: opacity 360ms cubic-bezier(.22,.61,.36,1),
+              transform 360ms cubic-bezier(.22,.61,.36,1);
+  pointer-events: none;
+  z-index: 3;
+}
+.slide.active {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+.slide.exit-left {
+  opacity: 0;
+  transform: translateX(-8px);
+}
+
+/* ---------------- PAGE FURNITURE ---------------- */
+.run-head, .run-foot {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+.run-head {
+  border-bottom: 0.5px solid var(--rule);
+  padding-bottom: 14px;
+  margin-bottom: 36px;
+}
+.run-foot {
+  border-top: 0.5px solid var(--rule);
+  padding-top: 14px;
+  margin-top: auto;
+}
+.run-head > *, .run-foot > * { white-space: nowrap; }
+.run-head > :nth-child(2), .run-foot > :nth-child(2) {
+  text-align: center;
+}
+.run-head > :nth-child(3), .run-foot > :nth-child(3) {
+  text-align: right;
+}
+.run-head .accent { color: var(--specimen); }
+.run-foot .pg { color: var(--ink); font-weight: 500; }
+.run-foot .pg .total { color: var(--pencil); }
+
+/* ---------------- PRIMITIVES ---------------- */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  font-weight: 500;
+}
+.eyebrow .num { color: var(--ink); margin-right: 10px; }
+.eyebrow.muted { color: var(--pencil); }
+.eyebrow.muted .num { color: var(--ink); }
+
+.kicker {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+}
+
+h1.display {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 96px;
+  line-height: 0.95;
+  letter-spacing: -0.025em;
+  font-variation-settings: 'opsz' 144, 'SOFT' 30;
+  color: var(--ink);
+}
+
+h2.section-en {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 64px;
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  font-variation-settings: 'opsz' 144;
+  color: var(--ink);
+}
+h2.section-en .roman {
+  font-style: normal;
+  font-weight: 500;
+  font-feature-settings: 'smcp';
+  margin-right: 18px;
+  color: var(--specimen);
+}
+h2.section-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 30px;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  margin-top: 14px;
+  color: var(--ink);
+}
+.lede {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 16.5px;
+  line-height: 1.75;
+  color: var(--ink);
+  max-width: 56ch;
+}
+.lede .em { color: var(--specimen); font-weight: 500; }
+
+.copy {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 14.5px;
+  line-height: 1.78;
+  color: var(--ink);
+}
+.copy.dim { color: #4A4540; }
+.note {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--pencil);
+}
+
+.divider {
+  border: 0; border-top: 0.5px solid var(--rule);
+  margin: 24px 0;
+}
+.divider.thick {
+  border-top: 1px solid var(--ink);
+}
+.divider.short {
+  width: 56px;
+  border-top: 1px solid var(--specimen);
+  margin: 18px 0;
+}
+
+.figref {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pencil);
+}
+
+/* ---------------- LAYOUT HELPERS ---------------- */
+.body {
+  flex: 1;
+  display: grid;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.row { display: flex; gap: 36px; }
+.col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.spacer { flex: 1; }
+
+/* ============================================================
+   SLIDE 1 — COVER
+   ============================================================ */
+.cover .body {
+  grid-template-columns: 1.55fr 1fr;
+  gap: 64px;
+}
+.cover-main { display: flex; flex-direction: column; justify-content: space-between; }
+.cover-fig {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  color: var(--specimen);
+  text-transform: uppercase;
+  margin-bottom: 28px;
+}
+.cover-roman {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 30px;
+  color: var(--specimen);
+  margin-bottom: 4px;
+  letter-spacing: -0.01em;
+}
+.cover-title-en {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 138px;
+  line-height: 0.88;
+  letter-spacing: -0.035em;
+  font-variation-settings: 'opsz' 144;
+  color: var(--ink);
+  margin-bottom: 20px;
+}
+.cover-title-en em {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--specimen);
+  font-feature-settings: 'ss01';
+}
+.cover-rule {
+  width: 96px; height: 1px;
+  background: var(--specimen);
+  margin: 30px 0 24px;
+}
+.cover-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 38px;
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  margin-bottom: 14px;
+}
+.cover-tag {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--pencil);
+  max-width: 52ch;
+}
+.cover-spec {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 24px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-top: 36px;
+}
+.cover-spec .v { color: var(--ink); letter-spacing: 0.08em; }
+
+.cover-toc {
+  border-left: 0.5px solid var(--rule);
+  padding-left: 36px;
+  display: flex;
+  flex-direction: column;
+}
+.cover-toc .lbl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  margin-bottom: 22px;
+}
+.cover-toc ol {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+.cover-toc li {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 0.5px solid var(--rule-faint);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.cover-toc li:last-child { border-bottom: none; }
+.cover-toc li .rom {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13px;
+  color: var(--pencil);
+}
+.cover-toc li .nm-zh {
+  font-family: var(--sans-zh);
+  font-weight: 400;
+}
+.cover-toc li .nm-en {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--pencil);
+}
+
+/* ============================================================
+   SLIDE 2 — BACKGROUND
+   ============================================================ */
+.s-back .body {
+  grid-template-rows: auto 1fr auto;
+  gap: 0;
+}
+.s-back .head-block { display: flex; flex-direction: column; gap: 16px; }
+.painpoints {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 56px;
+  margin-top: 50px;
+}
+.pp .num {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 86px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--specimen);
+  font-variation-settings: 'opsz' 144;
+  margin-bottom: 14px;
+}
+.pp .lbl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-bottom: 6px;
+}
+.pp .nm {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 24px;
+  letter-spacing: 0.06em;
+  margin-bottom: 16px;
+  color: var(--ink);
+}
+.pp .desc {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 13.5px;
+  line-height: 1.78;
+  color: var(--ink);
+}
+.goals {
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 36px;
+  padding-top: 30px;
+  border-top: 0.5px solid var(--rule);
+}
+.goals .gl {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 22px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.goals .gl .zh {
+  font-family: var(--serif-zh);
+  font-style: normal;
+  font-weight: 500;
+  font-size: 16px;
+  display: block;
+  margin-top: 4px;
+  color: var(--pencil);
+  letter-spacing: 0.04em;
+}
+.goal-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 24px;
+}
+.goal-list li {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink);
+  padding-left: 18px;
+  position: relative;
+}
+.goal-list li::before {
+  content: ''; position: absolute;
+  left: 0; top: 9px; width: 8px; height: 1px;
+  background: var(--specimen);
+}
+
+/* ============================================================
+   SLIDE 3 — ARCHITECTURE
+   ============================================================ */
+.s-arch .body {
+  grid-template-rows: auto 1fr auto;
+  gap: 28px;
+}
+.s-arch .arch-svg {
+  width: 100%;
+  height: 100%;
+  max-height: 480px;
+}
+.arch-caption {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 32px;
+  align-items: baseline;
+  padding-top: 16px;
+  border-top: 0.5px solid var(--rule-faint);
+}
+.arch-caption .ref {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--specimen);
+  text-transform: uppercase;
+}
+.arch-caption .desc {
+  font-family: var(--sans-zh);
+  font-size: 12.5px;
+  font-weight: 300;
+  color: var(--pencil);
+  line-height: 1.6;
+}
+
+/* ============================================================
+   SLIDE 4 — PHILOSOPHY (typographic hero)
+   ============================================================ */
+.s-phil .body {
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+}
+.phil-hero {
+  display: grid;
+  grid-template-columns: 1fr 0.5px 1fr;
+  gap: 0;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+.phil-side {
+  padding: 0 56px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.phil-side.left { padding-left: 0; }
+.phil-side.right { padding-right: 0; }
+.phil-divider {
+  background: var(--rule);
+}
+.phil-tag {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-bottom: 16px;
+}
+.phil-tag .pin { color: var(--specimen); margin-right: 10px; }
+.phil-headline {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 70px;
+  line-height: 1;
+  letter-spacing: -0.025em;
+  font-variation-settings: 'opsz' 144;
+  color: var(--ink);
+}
+.phil-headline em {
+  font-style: italic;
+  color: var(--specimen);
+}
+.phil-headline-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  margin-top: 12px;
+}
+.phil-quote {
+  font-family: var(--serif-zh);
+  font-weight: 500;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  line-height: 1.55;
+  margin-top: 16px;
+}
+.phil-quote em {
+  color: var(--specimen);
+  font-style: normal;
+  font-weight: 700;
+}
+.phil-list {
+  list-style: none;
+  margin-top: 18px;
+  display: grid;
+  gap: 8px;
+}
+.phil-list li {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  padding-left: 28px;
+  position: relative;
+}
+.phil-list li::before {
+  content: counter(p, decimal-leading-zero);
+  counter-increment: p;
+  position: absolute; left: 0; top: 1px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--specimen);
+}
+.phil-list { counter-reset: p; }
+
+.phil-bottom {
+  border-top: 0.5px solid var(--rule);
+  padding-top: 14px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 24px;
+  align-items: baseline;
+}
+.phil-bottom .lbl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+}
+.phil-bottom .txt {
+  font-family: var(--serif-zh);
+  font-weight: 500;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  letter-spacing: 0.03em;
+}
+.phil-bottom .txt em {
+  font-style: normal;
+  color: var(--specimen);
+  font-weight: 700;
+}
+
+/* ============================================================
+   SLIDE 5 — STACK (editorial spec table)
+   ============================================================ */
+.s-stack .body {
+  grid-template-rows: auto 1fr;
+  gap: 18px;
+}
+.stack-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--sans);
+  border-top: 1px solid var(--ink);
+  border-bottom: 0.5px solid var(--rule);
+}
+.stack-table thead th {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  font-weight: 500;
+  text-align: left;
+  padding: 10px 16px 10px 0;
+  border-bottom: 0.5px solid var(--rule);
+}
+.stack-table tbody tr { border-bottom: 0.5px solid var(--rule-faint); }
+.stack-table tbody tr:last-child { border-bottom: none; }
+.stack-table td {
+  padding: 9px 16px 9px 0;
+  vertical-align: top;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.stack-table td.idx {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--specimen);
+  width: 60px;
+  padding-top: 11px;
+}
+.stack-table td.layer {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--ink);
+  width: 120px;
+}
+.stack-table td.sel {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 15.5px;
+  letter-spacing: -0.01em;
+  width: 270px;
+  color: var(--ink);
+  font-variation-settings: 'opsz' 36;
+}
+.stack-table td.rat {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+/* ============================================================
+   SLIDE 6 — CHAINCODE
+   ============================================================ */
+.s-chain .body {
+  grid-template-columns: 0.95fr 1fr;
+  gap: 56px;
+}
+.cc-section { margin-bottom: 28px; }
+.cc-section h4 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  font-weight: 500;
+  margin-bottom: 14px;
+  padding-bottom: 6px;
+  border-bottom: 0.5px solid var(--rule);
+}
+.keys {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 2;
+  color: var(--ink);
+}
+.keys .v { color: var(--specimen); }
+.keys .c { color: var(--pencil); margin-left: 18px; }
+
+.method-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 18px;
+}
+.method-list li {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 0.5px solid var(--rule-faint);
+}
+.method-list li .m {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.method-list li .zh {
+  font-family: var(--sans-zh);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--pencil);
+}
+.method-list li .tag {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.18em;
+  color: var(--pencil);
+  text-transform: uppercase;
+}
+.method-list li .tag.r { color: var(--specimen); }
+
+.api-list {
+  list-style: none;
+  font-family: var(--sans-zh);
+  font-size: 13.5px;
+  font-weight: 300;
+  line-height: 1.78;
+}
+.api-list li { padding-left: 18px; position: relative; }
+.api-list li::before {
+  content: '·';
+  position: absolute; left: 0; top: -2px;
+  color: var(--specimen);
+  font-family: var(--mono);
+  font-size: 16px;
+}
+.api-list code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--paper-2);
+  padding: 1px 6px;
+  border-radius: 0;
+  color: var(--specimen);
+}
+
+.fsm-svg {
+  width: 100%;
+  height: 240px;
+  margin-top: 8px;
+}
+
+/* ============================================================
+   SLIDE 7 — VERSION CHAIN
+   ============================================================ */
+.s-ver .body {
+  grid-template-rows: auto 1fr;
+  gap: 28px;
+}
+.ver-svg {
+  width: 100%;
+  height: 100%;
+  max-height: 280px;
+  margin-bottom: 18px;
+}
+.ver-detail {
+  display: grid;
+  grid-template-columns: 1fr 0.5px 1fr;
+  gap: 0;
+  border-top: 0.5px solid var(--rule);
+  padding-top: 24px;
+}
+.ver-detail > .vd { padding: 0 36px; }
+.ver-detail > .vd:first-child { padding-left: 0; }
+.ver-detail > .vd:last-child { padding-right: 0; }
+.ver-detail > div.div { background: var(--rule); }
+.ver-detail h4 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+/* ============================================================
+   SLIDE 8 — ENCRYPTION
+   ============================================================ */
+.s-enc .body {
+  grid-template-rows: auto 1fr auto;
+  gap: 24px;
+}
+.enc-flows {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 28px;
+  margin-top: 8px;
+}
+.enc-flow {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 32px;
+  align-items: center;
+  padding: 18px 0;
+  border-top: 0.5px solid var(--rule);
+  border-bottom: 0.5px solid var(--rule);
+}
+.enc-flow .label {
+  border-right: 0.5px solid var(--rule);
+  padding-right: 18px;
+}
+.enc-flow .label .lb {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  margin-bottom: 6px;
+}
+.enc-flow .label .nm {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 32px;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+.enc-flow .label .nm-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 18px;
+  margin-top: 4px;
+  letter-spacing: 0.04em;
+}
+.enc-flow .pipeline {
+  width: 100%;
+  height: 96px;
+}
+.enc-tradeoff {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 28px;
+  padding-top: 18px;
+  border-top: 0.5px solid var(--rule);
+}
+.tradeoff .q {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14px;
+  color: var(--specimen);
+  margin-bottom: 6px;
+  letter-spacing: -0.005em;
+}
+.tradeoff .q-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 13.5px;
+  color: var(--ink);
+  margin-bottom: 6px;
+  letter-spacing: 0.03em;
+}
+.tradeoff .a {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+/* ============================================================
+   SLIDE 9 — ABAC
+   ============================================================ */
+.s-abac .body {
+  grid-template-columns: 1fr 1fr;
+  gap: 56px;
+}
+.abac-quad {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  border-top: 1px solid var(--ink);
+  border-left: 1px solid var(--ink);
+}
+.abac-cell {
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  padding: 28px 26px 24px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.abac-cell .num {
+  position: absolute;
+  top: 14px; right: 16px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--pencil);
+}
+.abac-cell .glyph {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 64px;
+  line-height: 1;
+  color: var(--specimen);
+  font-variation-settings: 'opsz' 144;
+  margin-bottom: 8px;
+  letter-spacing: -0.04em;
+  font-style: italic;
+}
+.abac-cell .term {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-bottom: 4px;
+}
+.abac-cell .term-zh {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+  color: var(--ink);
+}
+.abac-cell .desc {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.abac-aside { display: flex; flex-direction: column; gap: 18px; }
+.abac-aside .blk {
+  border-top: 0.5px solid var(--rule);
+  padding-top: 18px;
+}
+.abac-aside .blk h4 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+.abac-aside .blk p {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 13px;
+  line-height: 1.78;
+  color: var(--ink);
+}
+.abac-aside .blk p code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--paper-2);
+  padding: 0 5px;
+  color: var(--specimen);
+}
+.abac-aside .blk em {
+  font-style: normal;
+  color: var(--specimen);
+  font-weight: 500;
+}
+
+/* ============================================================
+   SLIDE 10 — EVENTS
+   ============================================================ */
+.s-evt .body {
+  grid-template-rows: auto auto 1fr auto;
+  gap: 24px;
+}
+.evt-svg {
+  width: 100%;
+  height: 240px;
+}
+.evt-types {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 14px;
+  margin-top: 12px;
+  border-top: 0.5px solid var(--rule);
+  padding-top: 18px;
+}
+.evt-type {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.evt-type .e {
+  color: var(--ink);
+  display: block;
+  margin-bottom: 4px;
+}
+.evt-type.warn .e { color: var(--specimen); }
+.evt-type .ez {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--pencil);
+}
+.evt-tradeoffs {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 32px;
+  border-top: 0.5px solid var(--rule);
+  padding-top: 16px;
+  margin-top: 8px;
+}
+.evt-tradeoffs .lbl {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 18px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.evt-tradeoffs .lbl .zh {
+  display: block;
+  font-family: var(--serif-zh);
+  font-style: normal;
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--pencil);
+  margin-top: 4px;
+  letter-spacing: 0.04em;
+}
+.evt-tradeoffs ul {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 22px;
+}
+.evt-tradeoffs li {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink);
+  padding-left: 18px;
+  position: relative;
+}
+.evt-tradeoffs li::before {
+  content: '—';
+  position: absolute; left: 0; top: 0;
+  color: var(--specimen);
+}
+.evt-tradeoffs li code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--specimen);
+}
+
+/* ============================================================
+   SLIDE 11 — SEQUENCE DIAGRAM
+   ============================================================ */
+.s-seq .body {
+  grid-template-rows: auto 1fr;
+  gap: 24px;
+}
+.seq-svg {
+  width: 100%;
+  height: 100%;
+  max-height: 580px;
+}
+
+/* ============================================================
+   SLIDE 12 — SECURITY
+   ============================================================ */
+.s-sec .body {
+  grid-template-rows: auto 1fr;
+  gap: 28px;
+}
+.sec-stack {
+  display: grid;
+  grid-template-rows: repeat(6, 1fr);
+  border-top: 1px solid var(--ink);
+}
+.sec-row {
+  display: grid;
+  grid-template-columns: 86px 200px 1fr;
+  gap: 32px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 0.5px solid var(--rule);
+}
+.sec-row .num {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 30px;
+  color: var(--specimen);
+  letter-spacing: -0.02em;
+  font-variation-settings: 'opsz' 144;
+}
+.sec-row .lyr {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.sec-row .lyr .en {
+  display: block;
+  font-family: var(--mono);
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-top: 4px;
+}
+.sec-row .meas {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.sec-row .meas em {
+  font-style: normal;
+  color: var(--specimen);
+  font-weight: 500;
+}
+
+/* ============================================================
+   SLIDE 13 — OPERATIONS
+   ============================================================ */
+.s-ops .body {
+  grid-template-columns: 1fr 1fr;
+  gap: 56px;
+}
+.ops-block { display: flex; flex-direction: column; gap: 20px; }
+.ops-block h4 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  font-weight: 500;
+  padding-bottom: 8px;
+  border-bottom: 0.5px solid var(--rule);
+}
+.ops-block ul {
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+.ops-block ul li {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+  padding-left: 20px;
+  position: relative;
+}
+.ops-block ul li::before {
+  content: ''; position: absolute; left: 0; top: 9px;
+  width: 8px; height: 1px; background: var(--specimen);
+}
+.ops-block ul li code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--specimen);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.metric {
+  border: 0.5px solid var(--rule);
+  padding: 12px 14px;
+}
+.metric .k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pencil);
+  margin-bottom: 6px;
+}
+.metric .v {
+  font-family: var(--mono);
+  font-size: 14.5px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.topo-svg {
+  width: 100%;
+  height: 200px;
+}
+
+/* ============================================================
+   SLIDE 14 — SUMMARY
+   ============================================================ */
+.s-sum .body {
+  grid-template-rows: auto 1fr auto;
+  gap: 28px;
+}
+.sum-grid {
+  display: grid;
+  grid-template-columns: 0.85fr 0.5px 1fr;
+  gap: 0;
+  flex: 1;
+}
+.sum-col { padding: 0 36px; }
+.sum-col:first-child { padding-left: 0; }
+.sum-col:last-child { padding-right: 0; }
+.sum-divider { background: var(--rule); }
+
+.sum-col h4 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+  margin-bottom: 22px;
+  padding-bottom: 10px;
+  border-bottom: 0.5px solid var(--rule);
+}
+
+.judge-list { list-style: none; display: grid; gap: 22px; }
+.judge {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 18px;
+}
+.judge .roman {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 36px;
+  line-height: 1;
+  color: var(--specimen);
+  letter-spacing: -0.02em;
+  font-variation-settings: 'opsz' 144;
+}
+.judge .qa { display: flex; flex-direction: column; gap: 4px; }
+.judge .q {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pencil);
+}
+.judge .a {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  line-height: 1.4;
+}
+.judge .a em {
+  font-style: normal;
+  color: var(--specimen);
+}
+
+.mech-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px 26px;
+}
+.mech {
+  border-top: 0.5px solid var(--rule);
+  padding-top: 12px;
+}
+.mech .nu {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--specimen);
+  margin-bottom: 6px;
+}
+.mech .nm {
+  font-family: var(--serif-zh);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  margin-bottom: 6px;
+}
+.mech .ds {
+  font-family: var(--sans-zh);
+  font-weight: 300;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+.sum-coda {
+  border-top: 1px solid var(--ink);
+  padding-top: 20px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 32px;
+  align-items: baseline;
+}
+.sum-coda .lbl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--specimen);
+}
+.sum-coda .txt {
+  font-family: var(--serif-zh);
+  font-weight: 500;
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--ink);
+  letter-spacing: 0.03em;
+}
+.sum-coda .end {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 16px;
+  color: var(--pencil);
+  letter-spacing: -0.01em;
+}
+
+/* ---------------- NAVIGATION ---------------- */
+.nav {
+  position: fixed;
+  bottom: 24px; right: 24px;
+  display: flex; gap: 0;
+  z-index: 100;
+  background: rgba(239, 234, 224, 0.95);
+  border: 0.5px solid rgba(0,0,0,0.18);
+  backdrop-filter: blur(6px);
+}
+.nav button {
+  width: 44px; height: 36px;
+  background: transparent;
+  border: none;
+  border-right: 0.5px solid rgba(0,0,0,0.12);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--ink);
+  transition: background 160ms ease;
+}
+.nav button:last-child { border-right: none; }
+.nav button:hover { background: rgba(122, 39, 21, 0.10); color: var(--specimen); }
+.nav .ix {
+  width: 80px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--ink);
+  border-right: 0.5px solid rgba(0,0,0,0.12);
+}
+.nav .ix .total { color: var(--pencil); margin-left: 4px; }
+
+/* progress hairline at the deck top */
+.progress {
+  position: absolute; top: 0; left: 0;
+  height: 1px;
+  background: var(--specimen);
+  width: 0;
+  transition: width 320ms cubic-bezier(.22,.61,.36,1);
+  z-index: 4;
+}
+
+/* small responsive scaling — handled via JS transform too */
+@media (max-width: 1500px) {}
+</style>
+</head>
+<body>
+
+<div class="stage" id="stage">
+  <div class="deck" id="deck">
+
+    <div class="progress" id="progress"></div>
+
+    <!-- ============================================================
+         SLIDE 1 / COVER
+         ============================================================ -->
+    <section class="slide cover active" data-page="1">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> 医疗数据共享平台</div>
+        <div>System Design Report</div>
+        <div>Vol. I &nbsp;·&nbsp; 04 &nbsp;·&nbsp; 2026</div>
+      </header>
+
+      <div class="body">
+        <div class="cover-main">
+          <div>
+            <div class="cover-fig">FIG. 00 — FRONTISPIECE</div>
+            <div class="cover-roman">I.</div>
+            <h1 class="cover-title-en">System<br/><em>Design</em><br/>Report.</h1>
+            <div class="cover-rule"></div>
+            <div class="cover-zh">医疗数据共享平台</div>
+            <div class="cover-tag">基于 Hyperledger Fabric 联盟链的可信医疗数据共享系统 — 围绕"链上真相、链下视图"的双层数据策略所做的一次完整系统设计。</div>
+          </div>
+        </div>
+
+        <aside class="cover-toc">
+          <div class="lbl">Contents</div>
+          <ol>
+            <li><span class="rom">i</span><span class="nm-zh">封面</span><span class="nm-en">Cover</span></li>
+            <li><span class="rom">ii</span><span class="nm-zh">背景</span><span class="nm-en">Background</span></li>
+            <li><span class="rom">iii</span><span class="nm-zh">总体架构</span><span class="nm-en">Architecture</span></li>
+            <li><span class="rom">iv</span><span class="nm-zh">核心理念</span><span class="nm-en">Philosophy</span></li>
+            <li><span class="rom">v</span><span class="nm-zh">技术选型</span><span class="nm-en">Stack</span></li>
+            <li><span class="rom">vi</span><span class="nm-zh">链码层</span><span class="nm-en">Chaincode</span></li>
+            <li><span class="rom">vii</span><span class="nm-zh">病历版本链</span><span class="nm-en">Version Chain</span></li>
+            <li><span class="rom">viii</span><span class="nm-zh">文件加密</span><span class="nm-en">Encryption</span></li>
+            <li><span class="rom">ix</span><span class="nm-zh">链上 ABAC</span><span class="nm-en">ABAC</span></li>
+            <li><span class="rom">x</span><span class="nm-zh">事件驱动</span><span class="nm-en">Events</span></li>
+            <li><span class="rom">xi</span><span class="nm-zh">端到端流程</span><span class="nm-en">Flow</span></li>
+            <li><span class="rom">xii</span><span class="nm-zh">安全设计</span><span class="nm-en">Security</span></li>
+            <li><span class="rom">xiii</span><span class="nm-zh">部署与观测</span><span class="nm-en">Operations</span></li>
+            <li><span class="rom">xiv</span><span class="nm-zh">总结</span><span class="nm-en">Summary</span></li>
+          </ol>
+        </aside>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div class="pg">PG. 01<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 2 / BACKGROUND
+         ============================================================ -->
+    <section class="slide s-back" data-page="2">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Background</div>
+        <div>II. 项目背景</div>
+        <div>Pain Points &amp; Goals</div>
+      </header>
+
+      <div class="body">
+        <div class="head-block">
+          <div class="eyebrow"><span class="num">II.</span>BACKGROUND &nbsp;/&nbsp; 项目背景</div>
+          <h2 class="section-en"><span class="roman">02</span><em>Three persistent failures</em></h2>
+          <h2 class="section-zh">医疗数据共享的三个核心痛点</h2>
+        </div>
+
+        <div class="painpoints">
+          <div class="pp">
+            <div class="num">01</div>
+            <div class="lbl">Data Silos</div>
+            <div class="nm">数据孤岛</div>
+            <div class="desc">不同医院的病历系统彼此隔离，跨院调阅困难，重复检查浪费医疗资源。</div>
+          </div>
+          <div class="pp">
+            <div class="num">02</div>
+            <div class="lbl">Trust Deficit</div>
+            <div class="nm">信任缺失</div>
+            <div class="desc">中心化存储易被篡改且难以独立追溯，授权审批也缺乏不可抵赖的证据。</div>
+          </div>
+          <div class="pp">
+            <div class="num">03</div>
+            <div class="lbl">Control Imbalance</div>
+            <div class="nm">控制权失衡</div>
+            <div class="desc">患者作为数据真正的所有者，对"谁能看、看多久、看几次"几乎没有自主权。</div>
+          </div>
+        </div>
+
+        <div class="goals">
+          <div class="gl">
+            Design Goals.
+            <span class="zh">设计目标</span>
+          </div>
+          <ul class="goal-list">
+            <li>建立可验证、可审计、不可篡改的数据共享通道</li>
+            <li>把访问控制策略从应用层下沉到链码层</li>
+            <li>保留链下高效查询，链上保留唯一真相</li>
+          </ul>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>II — Background</div>
+        <div class="pg">PG. 02<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 3 / ARCHITECTURE
+         ============================================================ -->
+    <section class="slide s-arch" data-page="3">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Architecture</div>
+        <div>III. 系统总体架构</div>
+        <div>Four layers + Observability</div>
+      </header>
+
+      <div class="body">
+        <div class="head-block">
+          <div class="eyebrow"><span class="num">III.</span>SYSTEM ARCHITECTURE &nbsp;/&nbsp; 总体架构</div>
+          <h2 class="section-en" style="font-size:54px;margin-top:14px"><span class="roman">03</span><em>Four layers,</em> one observation plane.</h2>
+        </div>
+
+        <svg class="arch-svg" viewBox="0 0 1240 480" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+            </marker>
+          </defs>
+
+          <!-- vertical flow axis -->
+          <line x1="620" y1="14" x2="620" y2="466" stroke="#1A1612" stroke-opacity="0.22" stroke-width="0.5" stroke-dasharray="2 4"/>
+
+          <!-- LAYER 1 -->
+          <g transform="translate(0,0)">
+            <text x="0" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#7A2715">L₁</text>
+            <text x="36" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#8B847A">ACCESS</text>
+            <text x="0" y="34" font-family="Noto Serif SC" font-weight="700" font-size="14" fill="#1A1612">接入层</text>
+            <line x1="160" y1="22" x2="1240" y2="22" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+            <g transform="translate(180, 36)">
+              <rect x="0" y="0" width="240" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="16" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Nginx</text>
+              <text x="16" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">TLS 终结 · 反向代理 · 安全头</text>
+            </g>
+            <g transform="translate(440, 36)">
+              <rect x="0" y="0" width="240" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="16" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Browser</text>
+              <text x="16" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">JWT 鉴权 · WebSocket</text>
+            </g>
+          </g>
+
+          <!-- LAYER 2 -->
+          <g transform="translate(0,114)">
+            <text x="0" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#7A2715">L₂</text>
+            <text x="36" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#8B847A">PRESENTATION</text>
+            <text x="0" y="34" font-family="Noto Serif SC" font-weight="700" font-size="14" fill="#1A1612">表现层</text>
+            <line x1="160" y1="22" x2="1240" y2="22" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+            <g transform="translate(180, 36)">
+              <rect width="240" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="16" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Vue 3 + Vite</text>
+              <text x="16" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">三角色独立视图</text>
+            </g>
+            <g transform="translate(440, 36)">
+              <rect width="240" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="16" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Element Plus</text>
+              <text x="16" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">UI 组件库</text>
+            </g>
+            <g transform="translate(700, 36)">
+              <rect width="240" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="16" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Notification Bell</text>
+              <text x="16" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">实时通知中心</text>
+            </g>
+          </g>
+
+          <!-- LAYER 3 -->
+          <g transform="translate(0,228)">
+            <text x="0" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#7A2715">L₃</text>
+            <text x="36" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#8B847A">APPLICATION</text>
+            <text x="0" y="34" font-family="Noto Serif SC" font-weight="700" font-size="14" fill="#1A1612">应用层</text>
+            <line x1="160" y1="22" x2="1240" y2="22" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+            <g transform="translate(180, 36)">
+              <rect width="180" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">FastAPI</text>
+              <text x="14" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">业务编排 · 鉴权</text>
+            </g>
+            <g transform="translate(380, 36)">
+              <rect width="180" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">SQLAlchemy</text>
+              <text x="14" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">ORM · 数据迁移</text>
+            </g>
+            <g transform="translate(580, 36)">
+              <rect width="180" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Crypto Util</text>
+              <text x="14" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">AES-256-GCM 加密</text>
+            </g>
+            <g transform="translate(780, 36)">
+              <rect width="180" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="18" fill="#1A1612">Event Bus</text>
+              <text x="14" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">事件总线 · WS 推送</text>
+            </g>
+          </g>
+
+          <!-- LAYER 4 -->
+          <g transform="translate(0,342)">
+            <text x="0" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#7A2715">L₄</text>
+            <text x="36" y="14" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2" fill="#8B847A">DATA &amp; CHAIN</text>
+            <text x="0" y="34" font-family="Noto Serif SC" font-weight="700" font-size="14" fill="#1A1612">数据/链层</text>
+            <line x1="160" y1="22" x2="1240" y2="22" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+            <g transform="translate(180, 36)">
+              <rect width="148" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="17" fill="#1A1612">MySQL 8</text>
+              <text x="12" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">当前视图</text>
+            </g>
+            <g transform="translate(348, 36)">
+              <rect width="148" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="17" fill="#1A1612">Gateway</text>
+              <text x="12" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">Fabric SDK 封装</text>
+            </g>
+            <g transform="translate(516, 36)">
+              <rect width="148" height="56" fill="none" stroke="#7A2715" stroke-opacity="0.85" stroke-width="0.7"/>
+              <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="17" fill="#7A2715">Fabric 2.x</text>
+              <text x="12" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#7A2715">联盟链账本</text>
+            </g>
+            <g transform="translate(684, 36)">
+              <rect width="148" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="17" fill="#1A1612">CouchDB</text>
+              <text x="12" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">富查询世界状态</text>
+            </g>
+            <g transform="translate(852, 36)">
+              <rect width="148" height="56" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.5"/>
+              <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="17" fill="#1A1612">File Store</text>
+              <text x="12" y="42" font-family="Noto Sans SC" font-size="11" font-weight="400" fill="#8B847A">加密文件落盘</text>
+            </g>
+          </g>
+
+          <!-- Observability annotation -->
+          <g transform="translate(1020, 220)">
+            <line x1="0" y1="0" x2="0" y2="160" stroke="#7A2715" stroke-opacity="0.5" stroke-width="0.5" stroke-dasharray="2 3"/>
+            <text x="14" y="6" font-family="IBM Plex Mono" font-size="10" letter-spacing="2.2" fill="#7A2715">OBS.</text>
+            <text x="14" y="24" font-family="Noto Serif SC" font-weight="700" font-size="13" fill="#1A1612">观测面</text>
+            <text x="14" y="48" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">PROMETHEUS</text>
+            <text x="14" y="64" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">GRAFANA</text>
+            <text x="14" y="80" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">/METRICS</text>
+            <text x="14" y="96" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">/HEALTH</text>
+          </g>
+
+          <!-- arrows along axis -->
+          <g stroke="#1A1612" stroke-opacity="0.7" stroke-width="0.6" fill="none">
+            <line x1="620" y1="92" x2="620" y2="124" marker-end="url(#ah)"/>
+            <line x1="620" y1="206" x2="620" y2="238" marker-end="url(#ah)"/>
+            <line x1="620" y1="320" x2="620" y2="352" marker-end="url(#ah)"/>
+          </g>
+        </svg>
+
+        <div class="arch-caption">
+          <span class="ref">FIG. 01</span>
+          <span class="desc">分层架构 — 接入 / 表现 / 应用 / 数据&amp;链 四层垂直解耦，右侧观测面以虚线连接，跨层抓取指标与健康状态。链层以暗红描边强调。</span>
+          <span class="ref">N = 4 + 1</span>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>III — Architecture</div>
+        <div class="pg">PG. 03<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 4 / PHILOSOPHY
+         ============================================================ -->
+    <section class="slide s-phil" data-page="4">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Philosophy</div>
+        <div>IV. 核心设计理念</div>
+        <div>Two-tier Data Strategy</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">IV.</span>CORE PHILOSOPHY &nbsp;/&nbsp; 核心理念</div>
+        </div>
+
+        <div class="phil-hero">
+          <div class="phil-side left">
+            <div class="phil-tag"><span class="pin">on-chain</span>FABRIC LEDGER · COUCHDB</div>
+            <div class="phil-headline"><em>能</em><br/>不<br/>能</div>
+            <div class="phil-headline-zh">链上保留唯一真相</div>
+            <div class="phil-quote">由代码即<em>规则</em>。版本、状态、策略，皆由共识保证不可篡改。</div>
+            <ul class="phil-list">
+              <li>病历版本链 · 访问申请状态机 · 授权策略</li>
+              <li>每次写操作产生 TxID，自带时间戳与签名</li>
+              <li>策略改动 = 链码升级 = 全网投票</li>
+            </ul>
+          </div>
+          <div class="phil-divider"></div>
+          <div class="phil-side right">
+            <div class="phil-tag"><span class="pin">off-chain</span>MYSQL · FILE SYSTEM</div>
+            <div class="phil-headline">快<br/>不<br/><em>快</em></div>
+            <div class="phil-headline-zh">链下承载视图与体验</div>
+            <div class="phil-quote">查询、过滤、分页，承担<em>用户体验</em>层面的全部职责。</div>
+            <ul class="phil-list">
+              <li>最新版病历视图 · 文件密文 · 元数据</li>
+              <li>事件镜像便于检索 / 审计可视化</li>
+              <li>GATEWAY 30 秒 TTL 缓存，写时主动失效</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phil-bottom">
+          <div class="lbl">Coda &nbsp;·&nbsp; 一句话</div>
+          <div class="txt"><em>Fabric</em> 决定"能不能"，<em>MySQL</em> 决定"快不快"。哈希上链而非内容上链；策略下沉到链码而非应用；事件驱动同步而非轮询。</div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>IV — Core Philosophy</div>
+        <div class="pg">PG. 04<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 5 / STACK
+         ============================================================ -->
+    <section class="slide s-stack" data-page="5">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Stack</div>
+        <div>V. 技术栈选型</div>
+        <div>Specifications &amp; Rationale</div>
+      </header>
+
+      <div class="body">
+        <div class="head-block">
+          <div class="eyebrow"><span class="num">V.</span>TECHNICAL STACK &nbsp;/&nbsp; 技术选型</div>
+          <h2 class="section-en" style="font-size:54px;margin-top:14px"><span class="roman">05</span><em>Selection</em>, with reasons attached.</h2>
+        </div>
+
+        <table class="stack-table">
+          <thead>
+            <tr>
+              <th>Idx</th>
+              <th>Layer / 层</th>
+              <th>Selection / 选型</th>
+              <th>Rationale / 关键理由</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="idx">A.01</td>
+              <td class="layer">区块链<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Blockchain</span></td>
+              <td class="sel">Hyperledger Fabric 2.x</td>
+              <td class="rat">联盟链多组织 MSP，原生支持权限模型，符合医疗准入式场景</td>
+            </tr>
+            <tr>
+              <td class="idx">A.02</td>
+              <td class="layer">智能合约<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Chaincode</span></td>
+              <td class="sel">JavaScript / fabric-contract-api</td>
+              <td class="rat">SDK 成熟，团队学习曲线低，链码 49 条 Mocha 单测全绿</td>
+            </tr>
+            <tr>
+              <td class="idx">A.03</td>
+              <td class="layer">状态库<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">State DB</span></td>
+              <td class="sel">CouchDB</td>
+              <td class="rat">支持 Mango selector 富查询与索引，胜任"按医院 / 时间段"业务过滤</td>
+            </tr>
+            <tr>
+              <td class="idx">B.01</td>
+              <td class="layer">网关<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Gateway</span></td>
+              <td class="sel">Node.js + fabric-network</td>
+              <td class="rat">SDK 一等公民语言，承担连接管理、缓存、事件监听</td>
+            </tr>
+            <tr>
+              <td class="idx">B.02</td>
+              <td class="layer">后端<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Backend</span></td>
+              <td class="sel">FastAPI + SQLAlchemy</td>
+              <td class="rat">异步性能良好，自动生成 OpenAPI，类型注解友好</td>
+            </tr>
+            <tr>
+              <td class="idx">B.03</td>
+              <td class="layer">关系库<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">RDBMS</span></td>
+              <td class="sel">MySQL 8.0</td>
+              <td class="rat">事务能力强，承载链下当前视图与文件元数据</td>
+            </tr>
+            <tr>
+              <td class="idx">C.01</td>
+              <td class="layer">前端<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Frontend</span></td>
+              <td class="sel">Vue 3 + Element Plus + Vite</td>
+              <td class="rat">组合式 API + Element Plus，快速构建后台型多角色 UI</td>
+            </tr>
+            <tr>
+              <td class="idx">C.02</td>
+              <td class="layer">加密<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Cryptography</span></td>
+              <td class="sel">AES-256-GCM &nbsp;+&nbsp; SHA-256</td>
+              <td class="rat">认证加密自带完整性校验，配合上链哈希形成双层防篡改</td>
+            </tr>
+            <tr>
+              <td class="idx">C.03</td>
+              <td class="layer">编排<br/><span style="font-family:var(--mono);font-size:9.5px;font-weight:400;letter-spacing:.18em;color:var(--pencil);text-transform:uppercase">Orchestration</span></td>
+              <td class="sel">Docker Compose + prod overlay</td>
+              <td class="rat">一条命令拉起完整栈，便于演示与生产化部署切换</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>V — Stack</div>
+        <div class="pg">PG. 05<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 6 / CHAINCODE
+         ============================================================ -->
+    <section class="slide s-chain" data-page="6">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Chaincode</div>
+        <div>VI. 链码层</div>
+        <div>Smart Contract Design</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">VI.</span>CHAINCODE LAYER &nbsp;/&nbsp; 链码层设计</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">06</span><em>The last line</em> of business truth.</h2>
+
+          <div class="cc-section" style="margin-top:34px">
+            <h4>Key Space &nbsp;/&nbsp; 键空间</h4>
+            <div class="keys">
+<span class="v">RECORD_LATEST_</span>&lt;id&gt;<span class="c">— 最新版指针</span><br/>
+<span class="v">RECORD_</span>&lt;id&gt;<span class="v">_v</span>&lt;n&gt;<span class="c">— 历史版本快照</span><br/>
+<span class="v">REQ_</span>&lt;requestId&gt;<span class="c">— 访问申请状态机</span>
+            </div>
+          </div>
+
+          <div class="cc-section">
+            <h4>Fabric Advanced API</h4>
+            <ul class="api-list">
+              <li><code>getHistoryForKey</code> — 构建版本时间线</li>
+              <li><code>setEvent</code> — 触发链码事件，驱动通知</li>
+              <li><code>getQueryResultWithPagination</code> — CouchDB 富查询分页</li>
+              <li><code>clientIdentity.getMSPID</code> — MSP 身份绑定，防越权</li>
+            </ul>
+          </div>
+        </div>
+
+        <div>
+          <div class="cc-section">
+            <h4>14 Methods &nbsp;/&nbsp; 链码方法</h4>
+            <ul class="method-list">
+              <li><span class="m">CreateRecord</span><span class="zh">创建病历</span><span class="tag">REC</span></li>
+              <li><span class="m">UpdateRecord</span><span class="zh">修订病历</span><span class="tag">REC</span></li>
+              <li><span class="m">GetRecord</span><span class="zh">读取病历</span><span class="tag">REC</span></li>
+              <li><span class="m">GetRecordHistory</span><span class="zh">历史时间线</span><span class="tag">REC</span></li>
+              <li><span class="m">RequestAccess</span><span class="zh">发起申请</span><span class="tag">ACS</span></li>
+              <li><span class="m">ApproveAccess</span><span class="zh">批准申请</span><span class="tag">ACS</span></li>
+              <li><span class="m">RejectAccess</span><span class="zh">驳回申请</span><span class="tag">ACS</span></li>
+              <li><span class="m">RevokeAccess</span><span class="zh">撤销授权</span><span class="tag r">ACS</span></li>
+              <li><span class="m">AccessRecord</span><span class="zh">受控访问</span><span class="tag r">ACS</span></li>
+              <li><span class="m">GetRequest</span><span class="zh">读取申请</span><span class="tag">ACS</span></li>
+              <li><span class="m">GetRequestHistory</span><span class="zh">申请历史</span><span class="tag">ACS</span></li>
+              <li><span class="m">QueryRecordsByHospital</span><span class="zh">按医院查询</span><span class="tag">QRY</span></li>
+              <li><span class="m">QueryRecordsByPatient</span><span class="zh">按患者查询</span><span class="tag">QRY</span></li>
+              <li><span class="m">QueryRecordsByPeriod</span><span class="zh">按时段查询</span><span class="tag">QRY</span></li>
+            </ul>
+          </div>
+
+          <div class="cc-section">
+            <h4>Finite State Machine &nbsp;/&nbsp; 状态机</h4>
+
+            <svg class="fsm-svg" viewBox="0 0 600 230" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                  <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+                </marker>
+                <marker id="ah2r" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                  <path d="M0,0 L8,4 L0,8" fill="none" stroke="#7A2715" stroke-width="0.8"/>
+                </marker>
+              </defs>
+
+              <!-- nodes -->
+              <g font-family="IBM Plex Mono" font-size="11" letter-spacing="2.4">
+                <!-- PENDING -->
+                <g transform="translate(40,90)">
+                  <circle r="42" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+                  <text text-anchor="middle" y="-2" fill="#1A1612">PENDING</text>
+                  <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-size="11" font-weight="700" letter-spacing="2" fill="#8B847A">待审批</text>
+                </g>
+
+                <!-- APPROVED -->
+                <g transform="translate(220,40)">
+                  <circle r="44" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+                  <text text-anchor="middle" y="-2" fill="#1A1612">APPROVED</text>
+                  <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-size="11" font-weight="700" letter-spacing="2" fill="#8B847A">已批准</text>
+                </g>
+
+                <!-- REJECTED (terminal) -->
+                <g transform="translate(220,170)">
+                  <circle r="44" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+                  <circle r="38" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+                  <text text-anchor="middle" y="-2" fill="#1A1612">REJECTED</text>
+                  <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-size="11" font-weight="700" letter-spacing="2" fill="#8B847A">已驳回</text>
+                </g>
+
+                <!-- REVOKED (terminal, accent) -->
+                <g transform="translate(420,40)">
+                  <circle r="44" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+                  <circle r="38" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+                  <text text-anchor="middle" y="-2" fill="#7A2715">REVOKED</text>
+                  <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-size="11" font-weight="700" letter-spacing="2" fill="#7A2715">已撤销</text>
+                </g>
+
+                <!-- EXPIRED (implicit, terminal) -->
+                <g transform="translate(420,170)">
+                  <circle r="44" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.7" stroke-dasharray="3 3"/>
+                  <circle r="38" fill="none" stroke="#1A1612" stroke-opacity="0.45" stroke-width="0.7" stroke-dasharray="3 3"/>
+                  <text text-anchor="middle" y="-2" fill="#8B847A">EXPIRED</text>
+                  <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-size="11" font-weight="700" letter-spacing="2" fill="#8B847A">已过期</text>
+                </g>
+              </g>
+
+              <!-- edges -->
+              <g stroke="#1A1612" stroke-width="0.6" fill="none">
+                <path d="M 80,76 Q 130,40 178,40" marker-end="url(#ah2)"/>
+                <path d="M 80,104 Q 130,140 178,170" marker-end="url(#ah2)"/>
+                <path d="M 264,40 Q 340,40 378,40" stroke="#7A2715" marker-end="url(#ah2r)"/>
+                <path d="M 250,76 Q 320,140 380,170" stroke-dasharray="3 3" stroke-opacity="0.55" marker-end="url(#ah2)"/>
+              </g>
+
+              <!-- edge labels -->
+              <g font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">
+                <text x="100" y="36">approve</text>
+                <text x="100" y="148">reject</text>
+                <text x="290" y="32" fill="#7A2715">revoke</text>
+                <text x="296" y="116" font-style="italic">implicit · time</text>
+              </g>
+            </svg>
+            <div style="margin-top:8px"><span class="figref">FIG. 02 — 访问申请状态机. 红环为患者主动撤销, 虚线圈为隐式过期.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>VI — Chaincode</div>
+        <div class="pg">PG. 06<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 7 / VERSION CHAIN
+         ============================================================ -->
+    <section class="slide s-ver" data-page="7">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Version Chain</div>
+        <div>VII. 病历版本链</div>
+        <div>Append-only, hash-linked</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">VII.</span>VERSION CHAIN &nbsp;/&nbsp; 病历版本链</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">07</span><em>previous_tx_id</em>, threaded.</h2>
+        </div>
+
+        <svg class="ver-svg" viewBox="0 0 1240 260" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="ah3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+            </marker>
+          </defs>
+
+          <!-- baseline -->
+          <line x1="60" y1="130" x2="1180" y2="130" stroke="#1A1612" stroke-opacity="0.18" stroke-width="0.5"/>
+          <text x="60" y="116" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A">TIME →</text>
+
+          <!-- v1 -->
+          <g transform="translate(140,130)">
+            <circle r="6" fill="#1A1612"/>
+            <line x1="0" y1="-30" x2="0" y2="-6" stroke="#1A1612" stroke-opacity="0.4"/>
+            <text y="-40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" letter-spacing="1.6" fill="#8B847A">14:32 · BLOCK 0421</text>
+            <line x1="0" y1="6" x2="0" y2="42" stroke="#1A1612" stroke-opacity="0.4"/>
+            <g transform="translate(-90,52)">
+              <rect width="180" height="80" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="22" fill="#1A1612">v1</text>
+              <text x="14" y="42" font-family="Noto Serif SC" font-weight="700" font-size="12" letter-spacing="1" fill="#1A1612">初次创建</text>
+              <text x="14" y="60" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">prev: ø</text>
+              <text x="14" y="74" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">hash: 0x9af3…</text>
+            </g>
+          </g>
+
+          <!-- arrow v1->v2 -->
+          <line x1="160" y1="130" x2="380" y2="130" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ah3)"/>
+          <text x="270" y="124" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">previous_tx_id</text>
+
+          <!-- v2 -->
+          <g transform="translate(400,130)">
+            <circle r="6" fill="#1A1612"/>
+            <line x1="0" y1="-30" x2="0" y2="-6" stroke="#1A1612" stroke-opacity="0.4"/>
+            <text y="-40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" letter-spacing="1.6" fill="#8B847A">15:08 · BLOCK 0427</text>
+            <line x1="0" y1="6" x2="0" y2="42" stroke="#1A1612" stroke-opacity="0.4"/>
+            <g transform="translate(-90,52)">
+              <rect width="180" height="80" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="22" fill="#1A1612">v2</text>
+              <text x="14" y="42" font-family="Noto Serif SC" font-weight="700" font-size="12" letter-spacing="1" fill="#1A1612">补充检验报告</text>
+              <text x="14" y="60" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">prev: 0xab12…</text>
+              <text x="14" y="74" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">hash: 0x4d77…</text>
+            </g>
+          </g>
+
+          <!-- arrow v2->v3 -->
+          <line x1="420" y1="130" x2="640" y2="130" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ah3)"/>
+          <text x="530" y="124" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">previous_tx_id</text>
+
+          <!-- v3 -->
+          <g transform="translate(660,130)">
+            <circle r="6" fill="#1A1612"/>
+            <line x1="0" y1="-30" x2="0" y2="-6" stroke="#1A1612" stroke-opacity="0.4"/>
+            <text y="-40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" letter-spacing="1.6" fill="#8B847A">16:45 · BLOCK 0431</text>
+            <line x1="0" y1="6" x2="0" y2="42" stroke="#1A1612" stroke-opacity="0.4"/>
+            <g transform="translate(-90,52)">
+              <rect width="180" height="80" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="22" fill="#1A1612">v3</text>
+              <text x="14" y="42" font-family="Noto Serif SC" font-weight="700" font-size="12" letter-spacing="1" fill="#1A1612">订正诊断结论</text>
+              <text x="14" y="60" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">prev: 0x6c30…</text>
+              <text x="14" y="74" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">hash: 0x1e5a…</text>
+            </g>
+          </g>
+
+          <!-- arrow v3->LATEST -->
+          <line x1="680" y1="130" x2="900" y2="130" stroke="#7A2715" stroke-width="0.7" marker-end="url(#ah3)"/>
+          <text x="790" y="124" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#7A2715">RECORD_LATEST</text>
+
+          <!-- LATEST -->
+          <g transform="translate(920,130)">
+            <circle r="8" fill="none" stroke="#7A2715" stroke-width="0.8"/>
+            <circle r="3" fill="#7A2715"/>
+            <line x1="0" y1="-30" x2="0" y2="-10" stroke="#7A2715" stroke-opacity="0.6"/>
+            <text y="-40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" letter-spacing="1.6" fill="#7A2715">CURRENT POINTER</text>
+            <line x1="0" y1="10" x2="0" y2="42" stroke="#7A2715" stroke-opacity="0.6"/>
+            <g transform="translate(-110,52)">
+              <rect width="220" height="80" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+              <text x="14" y="22" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">latest</text>
+              <text x="14" y="42" font-family="Noto Serif SC" font-weight="700" font-size="12" letter-spacing="1" fill="#7A2715">最新版指针</text>
+              <text x="14" y="60" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">→ v3 (READ HERE)</text>
+              <text x="14" y="74" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.2" fill="#8B847A">getHistoryForKey()</text>
+            </g>
+          </g>
+
+          <!-- annotation right -->
+          <g transform="translate(1170,80)">
+            <text font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A" text-anchor="end">FIG. 03</text>
+            <text y="14" font-family="Noto Serif SC" font-weight="700" font-size="12" fill="#1A1612" text-anchor="end">单向追加</text>
+            <text y="30" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A" text-anchor="end">N = ∞</text>
+          </g>
+        </svg>
+
+        <div class="ver-detail">
+          <div class="vd">
+            <h4>Append-only Semantics &nbsp;/&nbsp; 设计要点</h4>
+            <p class="copy">修订不是覆盖，而是<em style="color:var(--specimen);font-style:normal;font-weight:500"> 追加新版本 </em>+ 推进 LATEST 指针。每一版都带 TxID、共识时间戳和签名，第三方可独立验证。MySQL 仅存最新版以保证查询效率。</p>
+          </div>
+          <div class="div"></div>
+          <div class="vd">
+            <h4>Query Strategy &nbsp;/&nbsp; 查询路径</h4>
+            <p class="copy">列表场景 → 直接查 MySQL 当前视图；溯源场景 → 调用 <code style="font-family:var(--mono);color:var(--specimen)">GetRecordHistory</code> 触达 Fabric。Gateway 30 秒 TTL 缓存，写操作主动失效，避免重复 query peer。</p>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>VII — Version Chain</div>
+        <div class="pg">PG. 07<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 8 / ENCRYPTION
+         ============================================================ -->
+    <section class="slide s-enc" data-page="8">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Encryption</div>
+        <div>VIII. 文件加密</div>
+        <div>Two-tier Integrity</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">VIII.</span>FILE ENCRYPTION &nbsp;/&nbsp; 文件加密</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">08</span><em>GCM</em> at rest, <em>SHA-256</em> on chain.</h2>
+        </div>
+
+        <div class="enc-flows">
+          <!-- UPLOAD -->
+          <div class="enc-flow">
+            <div class="label">
+              <div class="lb">UPLINK · 上传链路</div>
+              <div class="nm">Upload</div>
+              <div class="nm-zh">加密落盘 + 哈希存证</div>
+            </div>
+            <svg class="pipeline" viewBox="0 0 980 96" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <marker id="ahU" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5.5" markerHeight="5.5" orient="auto">
+                  <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+                </marker>
+              </defs>
+              <line x1="20" y1="48" x2="960" y2="48" stroke="#1A1612" stroke-opacity="0.22" stroke-width="0.5" stroke-dasharray="2 4"/>
+              <g font-family="IBM Plex Mono" font-size="10" letter-spacing="1.4" fill="#8B847A">
+                <!-- Step 1 -->
+                <g transform="translate(20,16)">
+                  <rect width="160" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">Plaintext</text>
+                  <text x="12" y="40" fill="#8B847A">明文文件</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">CLIENT UPLOAD</text>
+                </g>
+                <line x1="180" y1="48" x2="220" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahU)"/>
+                <!-- Step 2 -->
+                <g transform="translate(220,16)">
+                  <rect width="160" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">SHA-256</text>
+                  <text x="12" y="40" fill="#8B847A">明文哈希</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">STREAMED 64KB</text>
+                </g>
+                <line x1="380" y1="48" x2="420" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahU)"/>
+                <!-- Step 3 -->
+                <g transform="translate(420,16)">
+                  <rect width="180" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">AES-GCM Encrypt</text>
+                  <text x="12" y="40" fill="#8B847A">流式加密</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">+ NONCE / TAG</text>
+                </g>
+                <line x1="600" y1="48" x2="640" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahU)"/>
+                <!-- Step 4 -->
+                <g transform="translate(640,16)">
+                  <rect width="160" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">Ciphertext FS</text>
+                  <text x="12" y="40" fill="#8B847A">密文落盘</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">./storage/</text>
+                </g>
+                <line x1="800" y1="48" x2="840" y2="48" stroke="#7A2715" stroke-width="0.7" marker-end="url(#ahU)"/>
+                <!-- Step 5 -->
+                <g transform="translate(840,16)">
+                  <rect width="120" height="64" fill="none" stroke="#7A2715" stroke-width="0.8"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#7A2715">On-chain</text>
+                  <text x="12" y="40" fill="#7A2715">哈希上链</text>
+                  <text x="12" y="56" fill="#7A2715" font-size="9">SHA-256 ONLY</text>
+                </g>
+              </g>
+            </svg>
+          </div>
+
+          <!-- DOWNLOAD -->
+          <div class="enc-flow">
+            <div class="label">
+              <div class="lb">DOWNLINK · 下载链路</div>
+              <div class="nm">Download</div>
+              <div class="nm-zh">解密 + 双层校验</div>
+            </div>
+            <svg class="pipeline" viewBox="0 0 980 96" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <marker id="ahD" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5.5" markerHeight="5.5" orient="auto">
+                  <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+                </marker>
+              </defs>
+              <line x1="20" y1="48" x2="960" y2="48" stroke="#1A1612" stroke-opacity="0.22" stroke-width="0.5" stroke-dasharray="2 4"/>
+              <g font-family="IBM Plex Mono" font-size="10" letter-spacing="1.4" fill="#8B847A">
+                <g transform="translate(20,16)">
+                  <rect width="160" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">Ciphertext</text>
+                  <text x="12" y="40" fill="#8B847A">读密文</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">+ NONCE / TAG</text>
+                </g>
+                <line x1="180" y1="48" x2="220" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahD)"/>
+                <g transform="translate(220,16)">
+                  <rect width="180" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">GCM Decrypt</text>
+                  <text x="12" y="40" fill="#8B847A">认证解密</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">TAG SELF-VERIFY</text>
+                </g>
+                <line x1="400" y1="48" x2="440" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahD)"/>
+                <g transform="translate(440,16)">
+                  <rect width="160" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">SHA-256</text>
+                  <text x="12" y="40" fill="#8B847A">明文重算</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">RE-COMPUTE</text>
+                </g>
+                <line x1="600" y1="48" x2="640" y2="48" stroke="#7A2715" stroke-width="0.7" marker-end="url(#ahD)"/>
+                <g transform="translate(640,16)">
+                  <rect width="160" height="64" fill="none" stroke="#7A2715" stroke-width="0.8"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#7A2715">Compare</text>
+                  <text x="12" y="40" fill="#7A2715">与链上比对</text>
+                  <text x="12" y="56" fill="#7A2715" font-size="9">≡ ON-CHAIN</text>
+                </g>
+                <line x1="800" y1="48" x2="840" y2="48" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahD)"/>
+                <g transform="translate(840,16)">
+                  <rect width="120" height="64" fill="none" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5"/>
+                  <text x="12" y="22" font-family="Fraunces" font-style="italic" font-size="16" fill="#1A1612">Stream</text>
+                  <text x="12" y="40" fill="#8B847A">流式下发</text>
+                  <text x="12" y="56" fill="#8B847A" font-size="9">O(1) MEMORY</text>
+                </g>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="enc-tradeoff">
+          <div class="tradeoff">
+            <div class="q">Why not the file?</div>
+            <div class="q-zh">为什么不上链原文</div>
+            <div class="a">医疗文件大且敏感，账本不适合存原文；哈希上链已足够建立"曾经存在过"的证据。</div>
+          </div>
+          <div class="tradeoff">
+            <div class="q">Why GCM?</div>
+            <div class="q-zh">为什么是 GCM</div>
+            <div class="a">CTR 模式吞吐高 + 自带 tag，密文被改立刻失败，无需额外 MAC。</div>
+          </div>
+          <div class="tradeoff">
+            <div class="q">Why double-hash?</div>
+            <div class="q-zh">为什么再算一次</div>
+            <div class="a">GCM 防"密文被改"，链上哈希防"业务侧偷换底层文件"，两层针对不同攻击面。</div>
+          </div>
+          <div class="tradeoff">
+            <div class="q">Key custody?</div>
+            <div class="q-zh">密钥管理</div>
+            <div class="a">主密钥经环境变量注入（MEDSHARE_FILE_KEY_BASE64），生产强制必填。</div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>VIII — Encryption</div>
+        <div class="pg">PG. 08<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 9 / ABAC
+         ============================================================ -->
+    <section class="slide s-abac" data-page="9">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> ABAC</div>
+        <div>IX. 链上 ABAC</div>
+        <div>Four-attribute Policy</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">IX.</span>ON-CHAIN ABAC &nbsp;/&nbsp; 链上访问控制</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">09</span><em>Four attributes,</em> all enforced.</h2>
+          <div class="abac-quad" style="margin-top:32px">
+            <div class="abac-cell">
+              <div class="num">A.01</div>
+              <div class="glyph">α</div>
+              <div class="term">Subject MSP</div>
+              <div class="term-zh">主体身份</div>
+              <div class="desc">调用者必须来自申请时记录的组织，链码用 <code style="font-family:var(--mono);font-size:11px;color:var(--specimen)">getMSPID</code> 校验。冒充无效。</div>
+            </div>
+            <div class="abac-cell">
+              <div class="num">A.02</div>
+              <div class="glyph">τ</div>
+              <div class="term">Validity Period</div>
+              <div class="term-zh">有效期</div>
+              <div class="desc"><code style="font-family:var(--mono);font-size:11px;color:var(--specimen)">expires_at</code> 由患者审批时填入；到期链码自动拒绝，无需后端介入。</div>
+            </div>
+            <div class="abac-cell">
+              <div class="num">A.03</div>
+              <div class="glyph">n</div>
+              <div class="term">Read Counter</div>
+              <div class="term-zh">最大次数</div>
+              <div class="desc"><code style="font-family:var(--mono);font-size:11px;color:var(--specimen)">remaining_reads</code> 在 AccessRecord 中原子递减，归零即拒。</div>
+            </div>
+            <div class="abac-cell">
+              <div class="num">A.04</div>
+              <div class="glyph">⊘</div>
+              <div class="term">Explicit Revoke</div>
+              <div class="term-zh">显式撤销</div>
+              <div class="desc">RevokeAccess 写入 REVOKED；状态机不可回退，撤销即终态。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="abac-aside">
+          <div class="blk">
+            <h4>Why on-chain &nbsp;/&nbsp; 为什么放在链码里</h4>
+            <p>后端代码可能存在缺陷或被绕过；链码是<em>所有 peer 节点共识的代码</em>。每一次访问都是一次 transaction —— 天然审计；策略修改 = 链码升级 = 全网投票，无法静默变更。</p>
+          </div>
+          <div class="blk">
+            <h4>Unauthorized Attempt &nbsp;/&nbsp; 非法访问处理</h4>
+            <p>链码触发 <code>UnauthorizedAttempt</code> 事件 → 经 Gateway 路由至后端事件总线 → 推送给患者与管理员 → 持久化到 <code>audit_events</code> 表，以备追责。</p>
+          </div>
+          <div class="blk">
+            <h4>Data Mirror &nbsp;/&nbsp; 链下镜像</h4>
+            <p>四个属性同时镜像到 MySQL <code>access_requests</code> 表用于业务查询；但<em>真相在链上</em> — 链下记录不一致时，以链码视图为准。</p>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>IX — ABAC</div>
+        <div class="pg">PG. 09<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 10 / EVENTS
+         ============================================================ -->
+    <section class="slide s-evt" data-page="10">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Events</div>
+        <div>X. 事件驱动通知</div>
+        <div>Chaincode → WebSocket</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">X.</span>EVENT-DRIVEN NOTIFICATION &nbsp;/&nbsp; 事件驱动通知</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">10</span><em>From chaincode</em> to desktop, end-to-end.</h2>
+        </div>
+
+        <svg class="evt-svg" viewBox="0 0 1240 240" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="ahE" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+            </marker>
+          </defs>
+
+          <!-- 4 stations along a horizontal axis -->
+          <line x1="80" y1="120" x2="1180" y2="120" stroke="#1A1612" stroke-opacity="0.18" stroke-width="0.5"/>
+
+          <!-- Station 1 -->
+          <g transform="translate(120,120)">
+            <circle r="34" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+            <text text-anchor="middle" y="-2" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2" fill="#7A2715">CHAINCODE</text>
+            <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#7A2715">链码</text>
+            <text text-anchor="middle" y="-58" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A">STAGE 01</text>
+            <text text-anchor="middle" y="60" font-family="Fraunces" font-style="italic" font-size="14" fill="#1A1612">setEvent()</text>
+            <text text-anchor="middle" y="76" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.4" fill="#8B847A">EMIT FROM TX</text>
+          </g>
+
+          <line x1="170" y1="120" x2="380" y2="120" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahE)"/>
+
+          <!-- Station 2 -->
+          <g transform="translate(420,120)">
+            <circle r="34" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+            <text text-anchor="middle" y="-2" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2" fill="#1A1612">GATEWAY</text>
+            <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">网关</text>
+            <text text-anchor="middle" y="-58" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A">STAGE 02</text>
+            <text text-anchor="middle" y="60" font-family="Fraunces" font-style="italic" font-size="14" fill="#1A1612">addContractListener</text>
+            <text text-anchor="middle" y="76" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.4" fill="#8B847A">CHECKPOINT · OFFSET</text>
+          </g>
+
+          <line x1="470" y1="120" x2="680" y2="120" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahE)"/>
+
+          <!-- Station 3 -->
+          <g transform="translate(720,120)">
+            <circle r="34" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+            <text text-anchor="middle" y="-2" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2" fill="#1A1612">BACKEND</text>
+            <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">后端</text>
+            <text text-anchor="middle" y="-58" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A">STAGE 03</text>
+            <text text-anchor="middle" y="60" font-family="Fraunces" font-style="italic" font-size="14" fill="#1A1612">event_bus.publish</text>
+            <text text-anchor="middle" y="76" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.4" fill="#8B847A">ROUTE BY SUBJECT</text>
+          </g>
+
+          <line x1="770" y1="120" x2="980" y2="120" stroke="#1A1612" stroke-width="0.6" marker-end="url(#ahE)"/>
+
+          <!-- Station 4 -->
+          <g transform="translate(1020,120)">
+            <circle r="34" fill="none" stroke="#1A1612" stroke-width="0.7"/>
+            <text text-anchor="middle" y="-2" font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2" fill="#1A1612">FRONTEND</text>
+            <text text-anchor="middle" y="14" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">前端</text>
+            <text text-anchor="middle" y="-58" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.6" fill="#8B847A">STAGE 04</text>
+            <text text-anchor="middle" y="60" font-family="Fraunces" font-style="italic" font-size="14" fill="#1A1612">/ws/notif</text>
+            <text text-anchor="middle" y="76" font-family="IBM Plex Mono" font-size="9" letter-spacing="1.4" fill="#8B847A">DESKTOP TOAST</text>
+          </g>
+
+          <!-- Side branch: audit_events -->
+          <line x1="720" y1="154" x2="720" y2="200" stroke="#1A1612" stroke-opacity="0.5" stroke-width="0.5" stroke-dasharray="2 3"/>
+          <g transform="translate(660,210)">
+            <text font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">AUDIT_EVENTS · 持久化</text>
+          </g>
+        </svg>
+
+        <div class="evt-types">
+          <div class="evt-type"><span class="e">RecordCreated</span><span class="ez">病历创建</span></div>
+          <div class="evt-type"><span class="e">RecordUpdated</span><span class="ez">病历修订</span></div>
+          <div class="evt-type"><span class="e">AccessRequested</span><span class="ez">发起申请</span></div>
+          <div class="evt-type"><span class="e">AccessApproved</span><span class="ez">审批通过</span></div>
+          <div class="evt-type"><span class="e">AccessRevoked</span><span class="ez">主动撤销</span></div>
+          <div class="evt-type warn"><span class="e">UnauthorizedAttempt</span><span class="ez">非法尝试</span></div>
+        </div>
+
+        <div class="evt-tradeoffs">
+          <div class="lbl">Trade-offs.<span class="zh">设计取舍</span></div>
+          <ul>
+            <li>WebSocket 连接也需 JWT 认证，避免越权订阅</li>
+            <li>事件 <code>offset</code> 在 Gateway 持久化，重启不丢</li>
+            <li>测试环境用内存版 <code>event_bus</code> 解耦真链</li>
+          </ul>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>X — Events</div>
+        <div class="pg">PG. 10<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 11 / SEQUENCE DIAGRAM
+         ============================================================ -->
+    <section class="slide s-seq" data-page="11">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Sequence</div>
+        <div>XI. 端到端流程</div>
+        <div>Cross-hospital Access</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">XI.</span>END-TO-END SEQUENCE &nbsp;/&nbsp; 端到端流程</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">11</span><em>Request</em>, approve, controlled download.</h2>
+        </div>
+
+        <svg class="seq-svg" viewBox="0 0 1240 580" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <marker id="ahS" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8" fill="none" stroke="#1A1612" stroke-width="0.8"/>
+            </marker>
+            <marker id="ahSr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8" fill="none" stroke="#7A2715" stroke-width="0.8"/>
+            </marker>
+          </defs>
+
+          <!-- Actor headers -->
+          <g font-family="IBM Plex Mono" font-size="10.5" letter-spacing="2.2">
+            <g transform="translate(140,40)">
+              <rect x="-58" y="-22" width="116" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+              <text text-anchor="middle" y="-4" fill="#1A1612">HOSPITAL B</text>
+              <text text-anchor="middle" y="10" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">医院 B</text>
+            </g>
+            <g transform="translate(360,40)">
+              <rect x="-58" y="-22" width="116" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+              <text text-anchor="middle" y="-4" fill="#1A1612">FASTAPI</text>
+              <text text-anchor="middle" y="10" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">后端</text>
+            </g>
+            <g transform="translate(580,40)">
+              <rect x="-58" y="-22" width="116" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+              <text text-anchor="middle" y="-4" fill="#1A1612">GATEWAY</text>
+              <text text-anchor="middle" y="10" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">网关</text>
+            </g>
+            <g transform="translate(800,40)">
+              <rect x="-66" y="-22" width="132" height="36" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+              <text text-anchor="middle" y="-4" fill="#7A2715">CHAINCODE</text>
+              <text text-anchor="middle" y="10" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#7A2715">链码</text>
+            </g>
+            <g transform="translate(1040,40)">
+              <rect x="-58" y="-22" width="116" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+              <text text-anchor="middle" y="-4" fill="#1A1612">PATIENT A</text>
+              <text text-anchor="middle" y="10" font-family="Noto Serif SC" font-weight="700" font-size="11" fill="#1A1612">患者 A</text>
+            </g>
+          </g>
+
+          <!-- Lifelines -->
+          <g stroke="#1A1612" stroke-opacity="0.22" stroke-width="0.5" stroke-dasharray="2 4">
+            <line x1="140" y1="80" x2="140" y2="540"/>
+            <line x1="360" y1="80" x2="360" y2="540"/>
+            <line x1="580" y1="80" x2="580" y2="540"/>
+            <line x1="800" y1="80" x2="800" y2="540"/>
+            <line x1="1040" y1="80" x2="1040" y2="540"/>
+          </g>
+
+          <!-- Steps -->
+          <g font-family="IBM Plex Mono" font-size="10.5" letter-spacing="1.5" fill="#1A1612">
+
+            <!-- step 01: B -> Backend -->
+            <g transform="translate(0,120)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">01</text>
+              <line x1="140" y1="0" x2="358" y2="0" stroke="#1A1612" stroke-width="0.7" marker-end="url(#ahS)"/>
+              <text x="250" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">POST /api/access-requests</text>
+              <text x="250" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">医院 B 发起跨院访问申请</text>
+            </g>
+
+            <!-- step 02: Backend -> Gateway -> Chaincode RequestAccess -->
+            <g transform="translate(0,180)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">02</text>
+              <line x1="360" y1="0" x2="798" y2="0" stroke="#1A1612" stroke-width="0.7" marker-end="url(#ahS)"/>
+              <text x="580" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">RequestAccess(...)</text>
+              <text x="580" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">后端经 Gateway 调用链码并写入申请</text>
+            </g>
+
+            <!-- step 03: Chaincode -> Patient (event) -->
+            <g transform="translate(0,240)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">03</text>
+              <line x1="800" y1="0" x2="1038" y2="0" stroke="#7A2715" stroke-width="0.7" marker-end="url(#ahSr)"/>
+              <text x="918" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#7A2715">setEvent · AccessRequested</text>
+              <text x="918" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">患者 A 实时收到申请通知</text>
+            </g>
+
+            <!-- step 04: Patient -> Backend (approval w/ TTL) -->
+            <g transform="translate(0,300)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">04</text>
+              <line x1="1040" y1="0" x2="362" y2="0" stroke="#1A1612" stroke-width="0.7" marker-end="url(#ahS)"/>
+              <text x="700" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">ApproveAccess · expires=7d · max=2</text>
+              <text x="700" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">患者填写期限与次数，提交审批</text>
+            </g>
+
+            <!-- step 05: Backend -> Chaincode (write APPROVED) -->
+            <g transform="translate(0,360)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">05</text>
+              <line x1="360" y1="0" x2="798" y2="0" stroke="#7A2715" stroke-width="0.7" marker-end="url(#ahSr)"/>
+              <text x="580" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#7A2715">PENDING → APPROVED</text>
+              <text x="580" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">链码写入 expires_at 与 max_reads</text>
+            </g>
+
+            <!-- step 06: B -> Backend -> Chaincode AccessRecord -->
+            <g transform="translate(0,420)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">06</text>
+              <line x1="140" y1="0" x2="798" y2="0" stroke="#1A1612" stroke-width="0.7" marker-end="url(#ahS)"/>
+              <text x="470" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">AccessRecord · MSP/TTL/COUNT</text>
+              <text x="470" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">下载先经链码原子校验并扣减次数</text>
+            </g>
+
+            <!-- step 07: Backend -> B (decrypted file stream) -->
+            <g transform="translate(0,480)">
+              <text x="36" y="-6" font-family="Fraunces" font-style="italic" font-size="22" fill="#7A2715">07</text>
+              <line x1="360" y1="0" x2="142" y2="0" stroke="#1A1612" stroke-width="0.7" marker-end="url(#ahS)"/>
+              <text x="250" y="-8" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" letter-spacing="1.4" fill="#8B847A">GCM DECRYPT · ≡ ON-CHAIN HASH</text>
+              <text x="250" y="14" text-anchor="middle" font-family="Noto Sans SC" font-weight="300" font-size="11" fill="#1A1612">校验通过后流式下发明文文件</text>
+            </g>
+          </g>
+
+          <!-- Coda annotation: post-revocation guard -->
+          <g transform="translate(140,540)">
+            <rect x="-4" y="-2" width="900" height="2" fill="#7A2715" opacity="0.6"/>
+          </g>
+          <text x="160" y="558" font-family="IBM Plex Mono" font-size="10" letter-spacing="1.6" fill="#7A2715">CODA · 撤销 / 过期 / 次数耗尽 → 链码层直接拒绝, 绕过后端无效.</text>
+        </svg>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>XI — Sequence</div>
+        <div class="pg">PG. 11<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 12 / SECURITY
+         ============================================================ -->
+    <section class="slide s-sec" data-page="12">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Security</div>
+        <div>XII. 安全设计</div>
+        <div>Defence in Depth</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">XII.</span>SECURITY MODEL &nbsp;/&nbsp; 纵深防御</div>
+          <h2 class="section-en" style="font-size:46px;margin-top:14px"><span class="roman">12</span><em>Six layers,</em> stacked.</h2>
+        </div>
+
+        <div class="sec-stack">
+          <div class="sec-row">
+            <div class="num">i.</div>
+            <div class="lyr">传输层<span class="en">TRANSPORT</span></div>
+            <div class="meas">Nginx 强制 <em>HTTPS</em>，HSTS / X-Frame-Options / X-Content-Type-Options / Referrer-Policy；HTTP 自动 301 → 443。</div>
+          </div>
+          <div class="sec-row">
+            <div class="num">ii.</div>
+            <div class="lyr">认证层<span class="en">AUTHENTICATION</span></div>
+            <div class="meas">密码使用 <em>bcrypt</em> 哈希存储，登录签发 JWT，账号支持 <em>is_active</em> 软禁用。</div>
+          </div>
+          <div class="sec-row">
+            <div class="num">iii.</div>
+            <div class="lyr">授权层<span class="en">AUTHORIZATION</span></div>
+            <div class="meas">后端做角色粗粒度过滤；链码做细粒度 <em>ABAC</em>（MSP / 期限 / 次数 / 撤销）。</div>
+          </div>
+          <div class="sec-row">
+            <div class="num">iv.</div>
+            <div class="lyr">数据层<span class="en">DATA</span></div>
+            <div class="meas">文件 <em>AES-256-GCM</em> 加密落盘；链上仅存 SHA-256；主密钥来自环境变量。</div>
+          </div>
+          <div class="sec-row">
+            <div class="num">v.</div>
+            <div class="lyr">限流层<span class="en">RATE LIMIT</span></div>
+            <div class="meas">slowapi 按 IP 节流；登录 5/min、注册 10/min，缓解暴力破解与扫描。</div>
+          </div>
+          <div class="sec-row">
+            <div class="num">vi.</div>
+            <div class="lyr">审计层<span class="en">AUDIT</span></div>
+            <div class="meas">所有关键写操作均上链 + 落 <em>audit_events</em> 表；非法尝试同样可追踪。</div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>XII — Security</div>
+        <div class="pg">PG. 12<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 13 / OPERATIONS
+         ============================================================ -->
+    <section class="slide s-ops" data-page="13">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Operations</div>
+        <div>XIII. 部署与观测</div>
+        <div>Compose · Prometheus · Grafana</div>
+      </header>
+
+      <div class="body">
+        <div class="ops-block">
+          <div class="eyebrow"><span class="num">XIII.</span>OBSERVABILITY &nbsp;/&nbsp; 可观测性</div>
+          <h2 class="section-en" style="font-size:42px;margin-top:6px"><em>Metrics</em>, traced.</h2>
+
+          <div>
+            <h4>Prometheus + Grafana</h4>
+            <ul>
+              <li>FastAPI 暴露 <code>/metrics</code>，Prometheus 每 15s 抓取一次</li>
+              <li>关键指标：QPS、P95 延迟、5xx 错误率、WebSocket 在线连接数、累计审计事件数</li>
+              <li>Grafana 预置 "MedShare Overview" 仪表板（4 面板）</li>
+              <li>三档健康探针：<code>/health</code>、<code>/health/live</code>、<code>/health/ready</code></li>
+            </ul>
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric"><div class="k">REQUESTS</div><div class="v">medshare_requests_total</div></div>
+            <div class="metric"><div class="k">LATENCY</div><div class="v">medshare_request_latency_seconds</div></div>
+            <div class="metric"><div class="k">WS</div><div class="v">medshare_ws_connections</div></div>
+            <div class="metric"><div class="k">AUDIT</div><div class="v">medshare_audit_events_emitted</div></div>
+          </div>
+
+          <div>
+            <h4>Quality Assurance &nbsp;/&nbsp; 质量保障</h4>
+            <ul>
+              <li>Caliper 链上压测：3 场景 TPS / 延迟基线</li>
+              <li>Locust API 压测：100 并发模拟真实业务</li>
+              <li>安全扫描：bandit + npm audit + OWASP ZAP 一键运行</li>
+              <li>测试：链码 49 条 + 后端 107 条单元 / 集成用例</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ops-block">
+          <div class="eyebrow muted"><span class="num">·</span>DEPLOYMENT &nbsp;/&nbsp; 部署形态</div>
+          <h2 class="section-en" style="font-size:42px;margin-top:6px"><em>Compose</em>, two overlays.</h2>
+
+          <div>
+            <h4>Form Factor &nbsp;/&nbsp; 部署模式</h4>
+            <ul>
+              <li>开发：基础 docker-compose，uvicorn 单进程</li>
+              <li>生产：基础 + prod overlay（Nginx + gunicorn × 4 worker + 资源限额 + 自动备份）</li>
+              <li>备份：MySQL 每日 mysqldump + 7 天滚动</li>
+            </ul>
+          </div>
+
+          <div>
+            <h4>Container Topology &nbsp;/&nbsp; 容器拓扑</h4>
+            <svg class="topo-svg" viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+              <!-- grid -->
+              <g font-family="IBM Plex Mono" font-size="10" letter-spacing="1.4" fill="#1A1612">
+                <g transform="translate(0,10)">
+                  <text font-size="9.5" letter-spacing="1.6" fill="#8B847A">EDGE</text>
+                  <rect x="0" y="20" width="100" height="36" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+                  <text x="50" y="42" text-anchor="middle" fill="#7A2715">nginx</text>
+                </g>
+                <g transform="translate(140,10)">
+                  <text font-size="9.5" letter-spacing="1.6" fill="#8B847A">APP</text>
+                  <rect x="0" y="20" width="100" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+                  <text x="50" y="42" text-anchor="middle">backend</text>
+                  <rect x="0" y="64" width="100" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+                  <text x="50" y="86" text-anchor="middle">frontend</text>
+                  <rect x="0" y="108" width="100" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+                  <text x="50" y="130" text-anchor="middle">gateway</text>
+                </g>
+                <g transform="translate(280,10)">
+                  <text font-size="9.5" letter-spacing="1.6" fill="#8B847A">DATA</text>
+                  <rect x="0" y="20" width="100" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+                  <text x="50" y="42" text-anchor="middle">mysql</text>
+                  <rect x="0" y="64" width="100" height="36" fill="none" stroke="#1A1612" stroke-width="0.6"/>
+                  <text x="50" y="86" text-anchor="middle">couchdb</text>
+                </g>
+                <g transform="translate(420,10)">
+                  <text font-size="9.5" letter-spacing="1.6" fill="#8B847A">LEDGER</text>
+                  <rect x="0" y="20" width="100" height="36" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+                  <text x="50" y="42" text-anchor="middle" fill="#7A2715">peers ×2</text>
+                  <rect x="0" y="64" width="100" height="36" fill="none" stroke="#7A2715" stroke-width="0.7"/>
+                  <text x="50" y="86" text-anchor="middle" fill="#7A2715">orderer</text>
+                </g>
+                <g transform="translate(140,170)">
+                  <text font-size="9.5" letter-spacing="1.6" fill="#8B847A">OBSERV.</text>
+                  <line x1="0" y1="-2" x2="380" y2="-2" stroke="#1A1612" stroke-opacity="0.22" stroke-width="0.5" stroke-dasharray="2 4"/>
+                  <rect x="0" y="6" width="100" height="20" fill="none" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+                  <text x="50" y="20" text-anchor="middle" font-size="9">prometheus</text>
+                  <rect x="120" y="6" width="100" height="20" fill="none" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+                  <text x="170" y="20" text-anchor="middle" font-size="9">grafana</text>
+                  <rect x="240" y="6" width="120" height="20" fill="none" stroke="#1A1612" stroke-opacity="0.55" stroke-width="0.5"/>
+                  <text x="300" y="20" text-anchor="middle" font-size="9">mysql-backup</text>
+                </g>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>XIII — Operations</div>
+        <div class="pg">PG. 13<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+    <!-- ============================================================
+         SLIDE 14 / SUMMARY
+         ============================================================ -->
+    <section class="slide s-sum" data-page="14">
+      <header class="run-head">
+        <div>MedShare <span class="accent">/</span> Summary</div>
+        <div>XIV. 总结</div>
+        <div>Three Judgements · Four Mechanisms</div>
+      </header>
+
+      <div class="body">
+        <div>
+          <div class="eyebrow"><span class="num">XIV.</span>SUMMARY &nbsp;/&nbsp; 设计回顾</div>
+          <h2 class="section-en" style="font-size:54px;margin-top:14px"><em>Three judgements,</em><br/>four mechanisms.</h2>
+        </div>
+
+        <div class="sum-grid">
+          <div class="sum-col">
+            <h4>Three Judgements &nbsp;/&nbsp; 三个判断</h4>
+            <ol class="judge-list">
+              <li class="judge">
+                <div class="roman">I.</div>
+                <div class="qa">
+                  <div class="q">What goes on chain?</div>
+                  <div class="a">什么<em>上链</em> — 哈希、状态、策略；不上原文。</div>
+                </div>
+              </li>
+              <li class="judge">
+                <div class="roman">II.</div>
+                <div class="qa">
+                  <div class="q">Who decides?</div>
+                  <div class="a">谁<em>说了算</em> — 链码代码即规则，后端只是搬运工。</div>
+                </div>
+              </li>
+              <li class="judge">
+                <div class="roman">III.</div>
+                <div class="qa">
+                  <div class="q">How fast?</div>
+                  <div class="a">如何保证<em>响应</em> — MySQL 当前视图 + 30s 缓存 + 流式 IO。</div>
+                </div>
+              </li>
+            </ol>
+          </div>
+
+          <div class="sum-divider"></div>
+
+          <div class="sum-col">
+            <h4>Four Mechanisms &nbsp;/&nbsp; 四个机制</h4>
+            <div class="mech-grid">
+              <div class="mech">
+                <div class="nu">M.01</div>
+                <div class="nm">病历版本链</div>
+                <div class="ds">previous_tx_id 串成单向链表，不可篡改的修订史。</div>
+              </div>
+              <div class="mech">
+                <div class="nu">M.02</div>
+                <div class="nm">双层完整性</div>
+                <div class="ds">AES-GCM tag + 链上 SHA-256，攻击面互不重叠。</div>
+              </div>
+              <div class="mech">
+                <div class="nu">M.03</div>
+                <div class="nm">链上 ABAC</div>
+                <div class="ds">期限 / 次数 / MSP / 撤销四属性同时生效。</div>
+              </div>
+              <div class="mech">
+                <div class="nu">M.04</div>
+                <div class="nm">事件驱动通知</div>
+                <div class="ds">setEvent → Gateway listener → WS 端到端推送。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sum-coda">
+          <div class="lbl">Coda</div>
+          <div class="txt">把"医疗数据可信共享"从口号落地为<em style="color:var(--specimen);font-style:normal;font-weight:700">一组可被独立验证的链上事实</em>，同时保留了传统 Web 系统的开发效率与查询性能。</div>
+          <div class="end">— end —</div>
+        </div>
+      </div>
+
+      <footer class="run-foot">
+        <div>MedShare · System Design</div>
+        <div>XIV — Summary &nbsp;·&nbsp; Q &amp; A</div>
+        <div class="pg">PG. 14<span class="total"> / 14</span></div>
+      </footer>
+    </section>
+
+  </div>
+</div>
+
+<!-- Navigation chrome -->
+<div class="nav" id="nav">
+  <button id="prev" title="Prev (←)">←</button>
+  <div class="ix"><span id="cur">01</span><span class="total">&nbsp;/ 14</span></div>
+  <button id="next" title="Next (→ / Space)">→</button>
+</div>
+
+<script>
+(function() {
+  const slides = document.querySelectorAll('.slide');
+  const total  = slides.length;
+  const cur    = document.getElementById('cur');
+  const prog   = document.getElementById('progress');
+  const deck   = document.getElementById('deck');
+  let idx = 0;
+
+  function go(n) {
+    n = Math.max(0, Math.min(total - 1, n));
+    if (n === idx) return;
+    slides[idx].classList.remove('active');
+    slides[idx].classList.add('exit-left');
+    setTimeout(() => slides[idx].classList.remove('exit-left'), 380);
+    idx = n;
+    slides[idx].classList.add('active');
+    cur.textContent = String(idx + 1).padStart(2, '0');
+    prog.style.width = ((idx + 1) / total * 100) + '%';
+  }
+  function prev() { go(idx - 1); }
+  function next() { go(idx + 1); }
+
+  document.getElementById('prev').addEventListener('click', prev);
+  document.getElementById('next').addEventListener('click', next);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); next(); }
+    if (e.key === 'ArrowLeft'  || e.key === 'PageUp')  { e.preventDefault(); prev(); }
+    if (e.key === 'Home') go(0);
+    if (e.key === 'End')  go(total - 1);
+  });
+
+  // initial state
+  cur.textContent = '01';
+  prog.style.width = (1 / total * 100) + '%';
+
+  // scale-to-fit
+  function fit() {
+    const sx = window.innerWidth  / 1440;
+    const sy = window.innerHeight / 900;
+    const s  = Math.min(sx, sy) * 0.96;
+    deck.style.transform = `scale(${s})`;
+  }
+  window.addEventListener('resize', fit);
+  fit();
+})();
+</script>
+
+</body>
+</html>
