@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "fabric-chaincode-node start",
+    "start:server-nontls": "fabric-chaincode-node server --chaincode-address=$CHAINCODE_SERVER_ADDRESS --chaincode-id=$CHAINCODE_ID",
     "test": "mocha --reporter spec --recursive test",
     "test:watch": "mocha --reporter spec --watch --recursive test",
     "coverage": "nyc --reporter=text --reporter=html mocha --recursive test"
@@ -13,8 +14,8 @@
     "node": ">=16"
   },
   "dependencies": {
-    "fabric-contract-api": "^2.5.8",
-    "fabric-shim": "^2.5.8"
+    "fabric-contract-api": "2.4.2",
+    "fabric-shim": "2.4.2"
   },
   "devDependencies": {
     "chai": "^4.4.1",

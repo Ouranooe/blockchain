@@ -14,10 +14,13 @@ def test_liveness_endpoint(client):
     assert client.get("/health/live").json() == {"status": "alive"}
 
 
-def test_readiness_probes_db(client):
+def test_readiness_probes_db_and_gateway(client):
     resp = client.get("/health/ready")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ready"}
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["database"] == "ready"
+    assert body["checks"]["gateway"]["status"] == "ready"
 
 
 def test_metrics_endpoint_exposes_prometheus_format(client, make_user, login_token):

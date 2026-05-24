@@ -25,6 +25,19 @@ if [ ! -d "${SAMPLES_DIR}" ]; then
 fi
 
 pushd "${SAMPLES_DIR}" >/dev/null
+if [ -d .git ]; then
+  git checkout -- \
+    test-network/network.sh \
+    test-network/compose/compose-ca.yaml \
+    test-network/compose/compose-test-net.yaml \
+    test-network/compose/docker/docker-compose-test-net.yaml \
+    test-network/addOrg3/compose/docker/docker-compose-org3.yaml \
+    test-network/organizations/fabric-ca/registerEnroll.sh \
+    test-network/scripts/createChannel.sh \
+    test-network/scripts/envVar.sh \
+    test-network/scripts/ccutils.sh
+fi
+
 echo "[fabric-bootstrap] downloading fabric binaries..."
 if [ ! -x "${SAMPLES_DIR}/bin/peer" ]; then
   curl -L "https://github.com/hyperledger/fabric/releases/download/v${FABRIC_VERSION}/hyperledger-fabric-linux-amd64-${FABRIC_VERSION}.tar.gz" -o /tmp/hyperledger-fabric.tgz
@@ -76,18 +89,60 @@ sed -i \
   -e 's|${DOCKER_SOCK}:/host/var/run/docker.sock|${DOCKER_SOCK}:/var/run/docker.sock|g' \
   "${SAMPLES_DIR}/test-network/compose/docker/docker-compose-test-net.yaml" \
   "${SAMPLES_DIR}/test-network/addOrg3/compose/docker/docker-compose-org3.yaml"
+if ! grep -q 'DOCKER_API_VERSION=' "${SAMPLES_DIR}/test-network/compose/docker/docker-compose-test-net.yaml"; then
+  sed -i \
+    -e "/CORE_VM_ENDPOINT=unix:\/\/\/var\/run\/docker.sock/a\      - DOCKER_API_VERSION=${DOCKER_API_VERSION:-1.44}" \
+    "${SAMPLES_DIR}/test-network/compose/docker/docker-compose-test-net.yaml"
+fi
+
+if [ -n "${FABRIC_DOCKER_HOST_ROOT:-}" ]; then
+  HOST_TEST_NETWORK="${FABRIC_DOCKER_HOST_ROOT}/fabric-network/runtime/fabric-samples/test-network"
+  echo "[fabric-bootstrap] patching compose bind mounts for docker-outside-docker host root: ${FABRIC_DOCKER_HOST_ROOT}"
+  sed -i \
+    -e "s|-v \"\$(pwd):/data\"|-v \"${HOST_TEST_NETWORK}:/data\"|g" \
+    "${SAMPLES_DIR}/test-network/network.sh"
+  sed -i \
+    -e "s|- ../organizations/fabric-ca|- ${HOST_TEST_NETWORK}/organizations/fabric-ca|g" \
+    "${SAMPLES_DIR}/test-network/compose/compose-ca.yaml"
+  sed -i \
+    -e "s|- ../organizations/ordererOrganizations|- ${HOST_TEST_NETWORK}/organizations/ordererOrganizations|g" \
+    -e "s|- ../organizations/peerOrganizations|- ${HOST_TEST_NETWORK}/organizations/peerOrganizations|g" \
+    -e "s|- ../organizations:|- ${HOST_TEST_NETWORK}/organizations:|g" \
+    -e "s|- ../scripts:|- ${HOST_TEST_NETWORK}/scripts:|g" \
+    "${SAMPLES_DIR}/test-network/compose/compose-test-net.yaml"
+  sed -i \
+    -e "s|- ./docker/peercfg:|- ${HOST_TEST_NETWORK}/compose/docker/peercfg:|g" \
+    "${SAMPLES_DIR}/test-network/compose/docker/docker-compose-test-net.yaml"
+fi
+
+echo "[fabric-bootstrap] patching test-network client endpoints for docker bootstrap container..."
+sed -i \
+  -e "s|localhost:7053|orderer.example.com:7053|g" \
+  "${SAMPLES_DIR}/test-network/scripts/createChannel.sh"
+sed -i \
+  -e "s|localhost:7051|peer0.org1.example.com:7051|g" \
+  -e "s|localhost:9051|peer0.org2.example.com:9051|g" \
+  -e "s|localhost:11051|peer0.org3.example.com:11051|g" \
+  "${SAMPLES_DIR}/test-network/scripts/envVar.sh"
+sed -i \
+  -e "s|-o localhost:7050|-o orderer.example.com:7050|g" \
+  "${SAMPLES_DIR}/test-network/scripts/ccutils.sh"
+sed -i \
+  -e "s|localhost:7054|org1.example.com:7054|g" \
+  -e "s|localhost:8054|org2.example.com:8054|g" \
+  -e "s|localhost:9054|example.com:9054|g" \
+  "${SAMPLES_DIR}/test-network/organizations/fabric-ca/registerEnroll.sh"
 popd >/dev/null
 
 pushd "${SAMPLES_DIR}/test-network" >/dev/null
 echo "[fabric-bootstrap] stopping old network (if exists)..."
 ./network.sh down || true
 
-echo "[fabric-bootstrap] starting network and channel (CouchDB state DB)..."
-# 迭代 7：-s couchdb 让 peer 世界状态库使用 CouchDB，启用富查询
-./network.sh up createChannel -ca -c "${CHANNEL_NAME}" -s couchdb
+echo "[fabric-bootstrap] starting network and channel..."
+./network.sh up createChannel -ca -c "${CHANNEL_NAME}"
 
-echo "[fabric-bootstrap] deploying chaincode (含 CouchDB 索引 META-INF)..."
-./network.sh deployCC -c "${CHANNEL_NAME}" -ccn "${CHAINCODE_NAME}" -ccp "${CHAINCODE_PATH_RUN}" -ccl javascript
+echo "[fabric-bootstrap] deploying chaincode as a service..."
+./network.sh deployCCAAS -c "${CHANNEL_NAME}" -ccn "${CHAINCODE_NAME}" -ccp "${CHAINCODE_PATH_RUN}"
 
 echo "[fabric-bootstrap] patching connection profiles for docker gateway..."
 sed -i 's/localhost/host.docker.internal/g' \

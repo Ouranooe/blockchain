@@ -3,6 +3,10 @@ import requests
 from .config import settings
 
 
+GATEWAY_TIMEOUT_SECONDS = 20
+GATEWAY_READY_TIMEOUT_SECONDS = 5
+
+
 def _hospital_to_org(hospital_name: str) -> str:
     normalized = (hospital_name or "").strip().lower()
     if normalized in {"hospitala", "hospital_a", "org1", "hospital a"}:
@@ -12,24 +16,59 @@ def _hospital_to_org(hospital_name: str) -> str:
     return "org1"
 
 
-def _post(path: str, payload: dict) -> dict:
+def _gateway_error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip() or response.reason
+    if isinstance(payload, dict):
+        return str(payload.get("message") or payload.get("detail") or payload)
+    return str(payload)
+
+
+def _request(method: str, path: str, **kwargs) -> dict:
     url = f"{settings.GATEWAY_URL}{path}"
     try:
-        response = requests.post(url, json=payload, timeout=20)
+        response = requests.request(method, url, timeout=GATEWAY_TIMEOUT_SECONDS, **kwargs)
         response.raise_for_status()
         return response.json()
+    except requests.HTTPError as exc:
+        response = exc.response
+        if response is not None:
+            raise RuntimeError(
+                f"调用 Gateway 失败({response.status_code}): {_gateway_error_detail(response)}"
+            ) from exc
+        raise RuntimeError(f"调用 Gateway 失败: {exc}") from exc
+    except requests.Timeout as exc:
+        raise RuntimeError(f"调用 Gateway 超时: {url}") from exc
+    except requests.ConnectionError as exc:
+        raise RuntimeError(f"无法连接 Gateway: {url}") from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"调用 Gateway 失败: {exc}") from exc
+
+
+def _post(path: str, payload: dict) -> dict:
+    return _request("POST", path, json=payload)
 
 
 def _get(path: str) -> dict:
-    url = f"{settings.GATEWAY_URL}{path}"
+    return _request("GET", path)
+
+
+def check_gateway_ready() -> dict:
+    ready_url = settings.GATEWAY_URL.rsplit("/api", 1)[0] + "/ready"
     try:
-        response = requests.get(url, timeout=20)
-        response.raise_for_status()
-        return response.json()
+        response = requests.get(ready_url, timeout=GATEWAY_READY_TIMEOUT_SECONDS)
+        payload = response.json()
+        if response.ok:
+            return payload
+        raise RuntimeError(f"Gateway 未就绪({response.status_code}): {payload}")
+    except requests.Timeout as exc:
+        raise RuntimeError(f"Gateway readiness 超时: {ready_url}") from exc
+    except requests.ConnectionError as exc:
+        raise RuntimeError(f"无法连接 Gateway readiness: {ready_url}") from exc
     except requests.RequestException as exc:
-        raise RuntimeError(f"调用 Gateway 失败: {exc}") from exc
+        raise RuntimeError(f"Gateway readiness 检查失败: {exc}") from exc
 
 
 def create_record_evidence(

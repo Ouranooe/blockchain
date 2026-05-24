@@ -29,6 +29,7 @@ from .gateway import (
     approve_access_request,
     create_access_request,
     create_record_evidence,
+    check_gateway_ready,
     query_access_request,
     query_access_request_history,
     query_pending_requests_for_patient,
@@ -250,14 +251,23 @@ def liveness():
 
 @app.get("/health/ready", include_in_schema=False)
 def readiness(db: Session = Depends(get_db)):
-    """迭代 8：readiness 探针 —— DB 可读才 200。"""
+    checks = {}
     try:
         from sqlalchemy import text
 
         db.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        checks["database"] = "ready"
     except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=503, detail=f"db_unreachable: {exc}")
+        checks["database"] = f"unready: {exc}"
+
+    try:
+        checks["gateway"] = check_gateway_ready()
+    except RuntimeError as exc:
+        checks["gateway"] = f"unready: {exc}"
+
+    if checks["database"] == "ready" and isinstance(checks["gateway"], dict):
+        return {"status": "ready", "checks": checks}
+    raise HTTPException(status_code=503, detail={"status": "unready", "checks": checks})
 
 
 @app.post(f"{settings.API_PREFIX}/auth/login", response_model=LoginResponse)

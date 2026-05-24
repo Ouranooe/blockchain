@@ -15,6 +15,11 @@ const CHANNEL_NAME = process.env.CHANNEL_NAME || "medicalchannel";
 const CHAINCODE_NAME = process.env.CHAINCODE_NAME || "medshare";
 const DISCOVERY_AS_LOCALHOST =
   (process.env.FABRIC_DISCOVERY_AS_LOCALHOST || "true").toLowerCase() === "true";
+const FABRIC_ENDPOINT_HOST = (process.env.FABRIC_ENDPOINT_HOST || "").trim();
+const READY_ORGS = (process.env.GATEWAY_READY_ORGS || "org1,org2")
+  .split(",")
+  .map((org) => normalizeOrg(org))
+  .filter((org, index, orgs) => orgs.indexOf(org) === index);
 
 // 迭代 3：链上历史查询 TTL 缓存（30s）。命中/未命中计数暴露到 /health 便于观察。
 const HISTORY_TTL_SECONDS = Number(process.env.HISTORY_CACHE_TTL || 30);
@@ -70,12 +75,38 @@ function normalizeOrg(org) {
   return value === "org2" ? "org2" : "org1";
 }
 
-function readFirstKeyFile(keyDir) {
-  const files = fs.readdirSync(keyDir).filter((name) => !name.startsWith("."));
-  if (!files.length) {
-    throw new Error(`No key file found in ${keyDir}`);
+function assertReadableFile(filePath, label) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`${label} not found: ${filePath}`);
   }
-  return path.join(keyDir, files[0]);
+  if (!fs.statSync(filePath).isFile()) {
+    throw new Error(`${label} is not a file: ${filePath}`);
+  }
+}
+
+function assertReadableDir(dirPath, label) {
+  if (!fs.existsSync(dirPath)) {
+    throw new Error(`${label} not found: ${dirPath}`);
+  }
+  if (!fs.statSync(dirPath).isDirectory()) {
+    throw new Error(`${label} is not a directory: ${dirPath}`);
+  }
+}
+
+function readFirstKeyFile(keyDir) {
+  assertReadableDir(keyDir, "Fabric private key directory");
+  const files = fs.readdirSync(keyDir)
+    .filter((name) => !name.startsWith("."))
+    .map((name) => path.join(keyDir, name))
+    .filter((filePath) => fs.statSync(filePath).isFile())
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+  const keyPath = files.find((filePath) =>
+    fs.readFileSync(filePath, "utf8").includes("PRIVATE KEY")
+  );
+  if (!keyPath) {
+    throw new Error(`No private key file found in ${keyDir}`);
+  }
+  return keyPath;
 }
 
 function parseResult(buffer) {
@@ -89,11 +120,40 @@ function parseResult(buffer) {
   }
 }
 
-async function withContract(org, action) {
-  const config = orgConfigs[normalizeOrg(org)];
-  const ccp = JSON.parse(fs.readFileSync(config.ccpPath, "utf8"));
-  const cert = fs.readFileSync(config.certPath, "utf8");
+function rewriteEndpointHost(url) {
+  if (!FABRIC_ENDPOINT_HOST) return url;
+  return String(url).replace(
+    /^([a-z][a-z0-9+.-]*:\/\/)(\[[^\]]+\]|[^/:]+)(:\d+)?(.*)$/i,
+    (_match, scheme, _host, port = "", rest = "") => `${scheme}${FABRIC_ENDPOINT_HOST}${port}${rest}`
+  );
+}
+
+function rewriteConnectionProfile(ccp) {
+  if (!FABRIC_ENDPOINT_HOST) return ccp;
+  const copy = JSON.parse(JSON.stringify(ccp));
+  ["peers", "orderers", "certificateAuthorities"].forEach((section) => {
+    Object.values(copy[section] || {}).forEach((endpoint) => {
+      if (endpoint.url) {
+        endpoint.url = rewriteEndpointHost(endpoint.url);
+      }
+    });
+  });
+  return copy;
+}
+
+function loadOrgMaterial(org) {
+  const normalized = normalizeOrg(org);
+  const config = orgConfigs[normalized];
+  assertReadableFile(config.ccpPath, `${normalized} connection profile`);
+  assertReadableFile(config.certPath, `${normalized} certificate`);
   const keyPath = readFirstKeyFile(config.keyDir);
+  return { normalized, config, keyPath };
+}
+
+async function withContract(org, action) {
+  const { config, keyPath } = loadOrgMaterial(org);
+  const ccp = rewriteConnectionProfile(JSON.parse(fs.readFileSync(config.ccpPath, "utf8")));
+  const cert = fs.readFileSync(config.certPath, "utf8");
   const privateKey = fs.readFileSync(keyPath, "utf8");
 
   const wallet = await Wallets.newInMemoryWallet();
@@ -133,6 +193,43 @@ async function evaluate(org, fnName, args) {
   });
 }
 
+function statusForError(error) {
+  const message = String(error && error.message ? error.message : "");
+  if (/not found/i.test(message)) return 404;
+  if (/already exists/i.test(message)) return 409;
+  return 502;
+}
+
+function sendGatewayError(res, error) {
+  const message = error && error.message ? error.message : "Fabric Gateway request failed";
+  res.status(statusForError(error)).json({
+    message,
+    error: "fabric_gateway_error"
+  });
+}
+
+function isReadinessProbeMiss(error) {
+  return /Record evidence __gateway_ready__ not found/i.test(String(error && error.message ? error.message : ""));
+}
+
+async function checkOrgReady(org) {
+  const normalized = normalizeOrg(org);
+  try {
+    await withContract(normalized, async (contract) => {
+      try {
+        await contract.evaluateTransaction("GetMedicalRecordEvidence", "__gateway_ready__");
+      } catch (error) {
+        if (!isReadinessProbeMiss(error)) {
+          throw error;
+        }
+      }
+    });
+    return { org: normalized, status: "ready" };
+  } catch (error) {
+    return { org: normalized, status: "unready", message: error.message };
+  }
+}
+
 app.get("/health", (_req, res) => {
   const total = cacheStats.hits + cacheStats.misses;
   const hitRate = total > 0 ? cacheStats.hits / total : 0;
@@ -146,6 +243,19 @@ app.get("/health", (_req, res) => {
       hitRate: Number(hitRate.toFixed(4)),
       size: historyCache.keys().length
     }
+  });
+});
+
+app.get("/ready", async (_req, res) => {
+  const checks = await Promise.all(READY_ORGS.map((org) => checkOrgReady(org)));
+  const ready = checks.every((check) => check.status === "ready");
+  res.status(ready ? 200 : 503).json({
+    status: ready ? "ready" : "unready",
+    channel: CHANNEL_NAME,
+    chaincode: CHAINCODE_NAME,
+    discoveryAsLocalhost: DISCOVERY_AS_LOCALHOST,
+    endpointHostOverride: FABRIC_ENDPOINT_HOST || null,
+    checks
   });
 });
 
@@ -164,7 +274,7 @@ app.post("/api/records/evidence", async (req, res) => {
     ]);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -174,7 +284,7 @@ app.get("/api/records/evidence/:recordId", async (req, res) => {
     const result = await evaluate(org, "GetMedicalRecordEvidence", [String(req.params.recordId)]);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -194,7 +304,7 @@ app.post("/api/records/evidence/:recordId/revise", async (req, res) => {
     invalidateRecordCache(req.params.recordId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -215,7 +325,7 @@ app.get("/api/records/evidence/:recordId/history", async (req, res) => {
     historyCache.set(key, result);
     res.json({ ...result, cache: "miss" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -235,7 +345,7 @@ app.get("/api/access-requests/:requestId/history", async (req, res) => {
     historyCache.set(key, result);
     res.json({ ...result, cache: "miss" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -249,7 +359,7 @@ app.get("/api/records/evidence/:recordId/version/:version", async (req, res) => 
     ]);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -272,7 +382,7 @@ app.post("/api/access-requests", async (req, res) => {
     invalidateRequestCache(requestId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -295,7 +405,7 @@ app.post("/api/access-requests/:requestId/approve", async (req, res) => {
     invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -316,7 +426,7 @@ app.post("/api/access-requests/:requestId/revoke", async (req, res) => {
     invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -332,7 +442,7 @@ app.post("/api/access-requests/:requestId/access", async (req, res) => {
     invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -347,7 +457,7 @@ app.post("/api/access-requests/:requestId/reject", async (req, res) => {
     invalidateRequestCache(req.params.requestId);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -357,7 +467,7 @@ app.get("/api/access-requests/:requestId", async (req, res) => {
     const result = await evaluate(org, "QueryAccessRequest", [String(req.params.requestId)]);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 });
 
@@ -382,7 +492,7 @@ async function _servePagedQuery(org, fnName, args, params, res) {
     richCache.set(key, result);
     res.json({ ...result, cache: "miss" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendGatewayError(res, error);
   }
 }
 

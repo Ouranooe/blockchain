@@ -28,12 +28,22 @@ services:
     container_name: medshare-fabric-bootstrap
     profiles: ["fabric-init"]
     working_dir: /workspace
+    environment:
+      FABRIC_DOCKER_HOST_ROOT: /host_mnt/d/Files In Disk D/codeJunior/blockChain/design
     volumes:
       - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "org1.example.com:host-gateway"
+      - "org2.example.com:host-gateway"
+      - "example.com:host-gateway"
+      - "peer0.org1.example.com:host-gateway"
+      - "peer0.org2.example.com:host-gateway"
+      - "orderer.example.com:host-gateway"
     command: >
       sh -c "
-      apk add --no-cache bash git curl libc6-compat gcompat &&
+      apk add --no-cache bash git curl jq libc6-compat gcompat &&
       bash /workspace/fabric-network/scripts/bootstrap.sh
       "
 
@@ -48,6 +58,7 @@ services:
       CHANNEL_NAME: medicalchannel
       CHAINCODE_NAME: medshare
       FABRIC_DISCOVERY_AS_LOCALHOST: "false"
+      FABRIC_ENDPOINT_HOST: host.docker.internal
     volumes:
       - ./fabric-network:/fabric-network
     extra_hosts:
@@ -55,6 +66,12 @@ services:
       - "peer0.org1.example.com:host-gateway"
       - "peer0.org2.example.com:host-gateway"
       - "orderer.example.com:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 20s
   backend:
     build:
       context: ./backend
@@ -71,13 +88,13 @@ services:
       mysql:
         condition: service_healthy
       gateway:
-        condition: service_started
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: http://localhost:8000/api
+        VITE_API_BASE_URL: http://127.0.0.1:8000/api
     container_name: medshare-frontend
     restart: unless-stopped
     ports:

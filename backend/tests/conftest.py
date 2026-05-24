@@ -457,6 +457,9 @@ def client(db_engine, db_session, monkeypatch):
         _cache_set(key, payload)
         return {**payload, "cache": "miss"}
 
+    def stub_check_gateway_ready():
+        return {"status": "ready", "checks": [{"org": "org1", "status": "ready"}]}
+
     for target in (gateway_module, main_module, files_module):
         if hasattr(target, "create_record_evidence"):
             monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
@@ -496,6 +499,8 @@ def client(db_engine, db_session, monkeypatch):
                 "query_pending_requests_for_patient",
                 stub_query_pending_requests_for_patient,
             )
+        if hasattr(target, "check_gateway_ready"):
+            monkeypatch.setattr(target, "check_gateway_ready", stub_check_gateway_ready)
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]
@@ -623,11 +628,16 @@ def _inner_client(db_engine, monkeypatch):
             return {"txId": f"{prefix}-stub-tx"}
         return _inner
 
+    def _stub_ready():
+        return {"status": "ready", "checks": [{"org": "org1", "status": "ready"}]}
+
     for target in (gateway_module, main_module, files_module):
         if hasattr(target, "create_record_evidence"):
             monkeypatch.setattr(target, "create_record_evidence", _stub_tx("rec"))
         if hasattr(target, "create_access_request"):
             monkeypatch.setattr(target, "create_access_request", _stub_tx("req"))
+        if hasattr(target, "check_gateway_ready"):
+            monkeypatch.setattr(target, "check_gateway_ready", _stub_ready)
 
     with TestClient(app) as c:
         yield c
