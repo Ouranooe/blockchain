@@ -527,6 +527,111 @@ def client(db_engine, db_session, monkeypatch):
         )
         return {"result": out, "cache": "miss"}
 
+    # 迭代 10：治理动作 stubs（模拟链码的双 MSP 状态机）
+    chain_store["governance"] = {}  # actionId -> snapshot
+    _GOV_KINDS = {
+        "FREEZE_RECORD",
+        "UNFREEZE_RECORD",
+        "BATCH_REVOKE_PATIENT",
+        "FORCE_DELETE_RECORD",
+    }
+
+    def _org_to_msp(org):
+        s = (org or "").lower()
+        return "Org2MSP" if "org2" in s else "Org1MSP"
+
+    def stub_propose_governance_action(**kwargs):
+        aid = str(kwargs["action_id"])
+        if aid in chain_store["governance"]:
+            raise RuntimeError(f"Governance action {aid} already exists")
+        kind = kwargs["kind"]
+        if kind not in _GOV_KINDS:
+            raise RuntimeError(f"未知治理动作 kind: {kind}")
+        msp = _org_to_msp(kwargs.get("org", "org1"))
+        tx = f"gov-{aid}-propose"
+        snap = {
+            "docType": "GovernanceAction",
+            "actionId": aid,
+            "kind": kind,
+            "payload": kwargs.get("payload") or {},
+            "proposerMsp": msp,
+            "status": "PROPOSED",
+            "approvers": [],
+            "proposedAt": kwargs.get("proposed_at", ""),
+            "proposeTxId": tx,
+            "executedAt": "",
+            "executeTxId": "",
+            "rejectedAt": "",
+            "rejectTxId": "",
+        }
+        chain_store["governance"][aid] = snap
+        return {"txId": tx, "result": snap}
+
+    def stub_approve_governance_action(**kwargs):
+        aid = str(kwargs["action_id"])
+        snap = chain_store["governance"].get(aid)
+        if not snap:
+            raise RuntimeError(f"Governance action {aid} not found")
+        if snap["status"] in ("EXECUTED", "REJECTED"):
+            raise RuntimeError(f"治理动作 {aid} 处于终态 {snap['status']}，无法再批准")
+        if snap["status"] == "APPROVED":
+            raise RuntimeError(f"治理动作 {aid} 已 APPROVED，无需再批")
+        msp = _org_to_msp(kwargs.get("org", "org1"))
+        for a in snap["approvers"]:
+            if a["msp"] == msp:
+                raise RuntimeError(f"MSP {msp} 已批准过该提案")
+        tx = f"gov-{aid}-approve-{len(snap['approvers']) + 1}"
+        snap["approvers"].append(
+            {"msp": msp, "approvedAt": kwargs.get("approved_at", ""), "txId": tx}
+        )
+        unique_msps = {a["msp"] for a in snap["approvers"]}
+        snap["status"] = "APPROVED" if len(unique_msps) >= 2 else "PARTIALLY_APPROVED"
+        return {"txId": tx, "result": snap}
+
+    def stub_reject_governance_action(**kwargs):
+        aid = str(kwargs["action_id"])
+        snap = chain_store["governance"].get(aid)
+        if not snap:
+            raise RuntimeError(f"Governance action {aid} not found")
+        if snap["status"] in ("EXECUTED", "REJECTED"):
+            raise RuntimeError(f"治理动作 {aid} 处于终态 {snap['status']}，无法再拒绝")
+        tx = f"gov-{aid}-reject"
+        snap["status"] = "REJECTED"
+        snap["rejectedAt"] = kwargs.get("rejected_at", "")
+        snap["rejectTxId"] = tx
+        return {"txId": tx, "result": snap}
+
+    def stub_execute_governance_action(**kwargs):
+        aid = str(kwargs["action_id"])
+        snap = chain_store["governance"].get(aid)
+        if not snap:
+            raise RuntimeError(f"Governance action {aid} not found")
+        if snap["status"] != "APPROVED":
+            raise RuntimeError(f"仅 APPROVED 可执行：当前状态 {snap['status']}")
+        tx = f"gov-{aid}-execute"
+        snap["status"] = "EXECUTED"
+        snap["executedAt"] = kwargs.get("executed_at", "")
+        snap["executeTxId"] = tx
+        return {"txId": tx, "result": snap}
+
+    def stub_get_governance_action(action_id, *, org="org1"):
+        aid = str(action_id)
+        snap = chain_store["governance"].get(aid)
+        if not snap:
+            raise RuntimeError(f"Governance action {aid} not found")
+        return {"result": snap}
+
+    def stub_list_governance_actions(**kwargs):
+        status = kwargs.get("status", "")
+        items = [
+            v for v in chain_store["governance"].values()
+            if not status or v["status"] == status
+        ]
+        out = _rich_paginate(
+            items, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
     for target in (gateway_module, main_module, files_module):
         if hasattr(target, "create_record_evidence"):
             monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
@@ -578,6 +683,30 @@ def client(db_engine, db_session, monkeypatch):
             )
         if hasattr(target, "list_anchor_batches"):
             monkeypatch.setattr(target, "list_anchor_batches", stub_list_anchor_batches)
+        if hasattr(target, "propose_governance_action"):
+            monkeypatch.setattr(
+                target, "propose_governance_action", stub_propose_governance_action
+            )
+        if hasattr(target, "approve_governance_action"):
+            monkeypatch.setattr(
+                target, "approve_governance_action", stub_approve_governance_action
+            )
+        if hasattr(target, "reject_governance_action"):
+            monkeypatch.setattr(
+                target, "reject_governance_action", stub_reject_governance_action
+            )
+        if hasattr(target, "execute_governance_action"):
+            monkeypatch.setattr(
+                target, "execute_governance_action", stub_execute_governance_action
+            )
+        if hasattr(target, "get_governance_action"):
+            monkeypatch.setattr(
+                target, "get_governance_action", stub_get_governance_action
+            )
+        if hasattr(target, "list_governance_actions"):
+            monkeypatch.setattr(
+                target, "list_governance_actions", stub_list_governance_actions
+            )
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]

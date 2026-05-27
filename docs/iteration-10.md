@@ -87,13 +87,23 @@ admin 视图新增"治理审批"页：
 - audit event 落库（GovernanceProposed/Approved/Executed）
 
 ## 五、量化指标
-（实施后填入）
+
+| 指标 | 数值 |
+|------|------|
+| 链码 mocha 用例数 | 56 → **63**（+7） |
+| 后端 pytest 用例数 | 117 → **126**（+9） |
+| 状态机非法跃迁拒绝率 | **100%**（同 MSP 重批 / 终态再批 / 未 APPROVED 直接执行 全部被拒） |
+| 端到端：Propose → Approve(Org1) → Approve(Org2) → Execute | **4 笔链上交易**完成 |
 
 ## 六、反思
-（实施后填入）
+
+- **执行动作的"语义"留给下游迭代**：本迭代 `ExecuteGovernanceAction` 只把状态机推到 `EXECUTED` 并触发事件，不做实际的链上写副作用（如解冻一条 record）。迭代 11 的 `UnfreezeRecord` 会校验"传入的治理 actionId 必须 EXECUTED 且 kind == UNFREEZE_RECORD"，这种"合约组合"是 Fabric 真实工程的常用模式 —— 治理与业务解耦，可独立演化。
+- **MSP 唯一性**只用了集合大小判断 `≥ 2`。如果未来要做 M-of-N（如 3 选 2 / 5 选 3），只需在 `ApproveGovernanceAction` 内增加配置阈值即可，状态机不变。
+- 后端层先校验 `GovernanceAction.action_id` 唯一性（409）再调链码，避免给链上留"被链码拒绝的脏 propose"。
+- 风险：本迭代后端层未额外校验 admin 的 MSP 与提案双方匹配，完全依赖链码 `_callerMsp(ctx)`。生产部署时应该让 backend 把 user.msp_org 透传到 gateway，gateway 根据它选择 Org1/Org2 的身份连接 —— 现 PR 已经在 `_proposer_org_to_gateway()` 做了这件事。
 
 ## 七、Done Definition
 
-- [ ] 链码 mocha：累计 ≥ 61 条全部通过
-- [ ] 后端 pytest：累计 ≥ 119 条全部通过
-- [ ] commit message：`迭代 10：链上多签治理（双 MSP endorse）`
+- [x] 链码 mocha：56 + 7 = **63 条**全部通过
+- [x] 后端 pytest：117 + 9 = **126 条**全部通过
+- [x] commit message：`迭代 10：链上多签治理（双 MSP endorse）`

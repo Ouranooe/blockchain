@@ -728,6 +728,191 @@ class MedShareContract extends Contract {
     );
     return JSON.stringify(out);
   }
+
+  // ---------------- 迭代 10：链上多签治理（双 MSP endorse） ----------------
+
+  _governanceKey(actionId) {
+    return `GOV_${actionId}`;
+  }
+
+  // 治理 kind 白名单：避免提案空间无限扩张；新增 kind 需要链码升级
+  static GOV_KINDS = new Set([
+    "FREEZE_RECORD",
+    "UNFREEZE_RECORD",
+    "BATCH_REVOKE_PATIENT",
+    "FORCE_DELETE_RECORD",
+  ]);
+
+  /**
+   * 迭代 10：提案高风险治理动作。
+   * - 任何 MSP 调用方都可提案
+   * - kind 必须在白名单
+   * - payloadJson 由链码原样保存（业务方自行约定字段）
+   */
+  async ProposeGovernanceAction(ctx, actionId, kind, payloadJson, proposedAt) {
+    if (!actionId) throw new Error("actionId 必填");
+    if (!MedShareContract.GOV_KINDS.has(kind)) {
+      throw new Error(`未知治理动作 kind: ${kind}`);
+    }
+    let payload;
+    try {
+      payload = JSON.parse(payloadJson || "{}");
+    } catch (_e) {
+      throw new Error("payloadJson 解析失败");
+    }
+    const key = this._governanceKey(actionId);
+    const existing = await this._getStateAsObject(ctx, key);
+    if (existing) {
+      throw new Error(`Governance action ${actionId} already exists`);
+    }
+    const proposerMsp = this._callerMsp(ctx);
+    const action = {
+      docType: "GovernanceAction",
+      actionId: String(actionId),
+      kind,
+      payload,
+      proposerMsp,
+      status: "PROPOSED",
+      approvers: [], // [{msp, approvedAt, txId}]
+      proposedAt: String(proposedAt || ""),
+      proposeTxId: ctx.stub.getTxID(),
+      executedAt: "",
+      executeTxId: "",
+      rejectedAt: "",
+      rejectTxId: "",
+    };
+    await this._putStateAsObject(ctx, key, action);
+    ctx.stub.setEvent(
+      "GovernanceProposed",
+      Buffer.from(JSON.stringify({
+        actionId: action.actionId,
+        kind,
+        proposerMsp,
+        txId: action.proposeTxId,
+      }))
+    );
+    return JSON.stringify(action);
+  }
+
+  async _readGovernance(ctx, actionId) {
+    const action = await this._getStateAsObject(ctx, this._governanceKey(actionId));
+    if (!action) throw new Error(`Governance action ${actionId} not found`);
+    return action;
+  }
+
+  async GetGovernanceAction(ctx, actionId) {
+    const action = await this._readGovernance(ctx, actionId);
+    return JSON.stringify(action);
+  }
+
+  /**
+   * 迭代 10：批准治理动作。
+   * - 调用方 MSP 不能与已批准 MSP 重复
+   * - PROPOSED → PARTIALLY_APPROVED；PARTIALLY_APPROVED + 不同 MSP → APPROVED
+   * - 终态（APPROVED/EXECUTED/REJECTED）不可再批
+   */
+  async ApproveGovernanceAction(ctx, actionId, approvedAt) {
+    const action = await this._readGovernance(ctx, actionId);
+    if (action.status === "EXECUTED" || action.status === "REJECTED") {
+      throw new Error(`治理动作 ${actionId} 处于终态 ${action.status}，无法再批准`);
+    }
+    if (action.status === "APPROVED") {
+      throw new Error(`治理动作 ${actionId} 已 APPROVED，无需再批`);
+    }
+    const callerMsp = this._callerMsp(ctx);
+    if (!callerMsp) throw new Error("调用方 MSP 不可解析");
+    for (const a of action.approvers) {
+      if (a.msp === callerMsp) {
+        throw new Error(`MSP ${callerMsp} 已批准过该提案`);
+      }
+    }
+    action.approvers.push({
+      msp: callerMsp,
+      approvedAt: String(approvedAt || ""),
+      txId: ctx.stub.getTxID(),
+    });
+    // 计算新状态
+    const uniqueMsps = new Set(action.approvers.map((a) => a.msp));
+    if (uniqueMsps.size >= 2) {
+      action.status = "APPROVED";
+    } else {
+      action.status = "PARTIALLY_APPROVED";
+    }
+    await this._putStateAsObject(ctx, this._governanceKey(actionId), action);
+    ctx.stub.setEvent(
+      "GovernanceApproved",
+      Buffer.from(JSON.stringify({
+        actionId: action.actionId,
+        approverMsp: callerMsp,
+        status: action.status,
+        approverCount: uniqueMsps.size,
+      }))
+    );
+    return JSON.stringify(action);
+  }
+
+  async RejectGovernanceAction(ctx, actionId, rejectedAt) {
+    const action = await this._readGovernance(ctx, actionId);
+    if (action.status === "EXECUTED" || action.status === "REJECTED") {
+      throw new Error(`治理动作 ${actionId} 处于终态 ${action.status}，无法再拒绝`);
+    }
+    const callerMsp = this._callerMsp(ctx);
+    action.status = "REJECTED";
+    action.rejectedAt = String(rejectedAt || "");
+    action.rejectTxId = ctx.stub.getTxID();
+    action.rejectorMsp = callerMsp;
+    await this._putStateAsObject(ctx, this._governanceKey(actionId), action);
+    ctx.stub.setEvent(
+      "GovernanceRejected",
+      Buffer.from(JSON.stringify({
+        actionId: action.actionId,
+        rejectorMsp: callerMsp,
+      }))
+    );
+    return JSON.stringify(action);
+  }
+
+  /**
+   * 迭代 10：执行治理动作。仅当 status == APPROVED 时允许。
+   * 注意：本链码仅"标记"为 EXECUTED 并触发事件；具体的链上副作用（例如解冻一条
+   * 病历）由迭代 11+ 的方法在校验 `executeTxId` 后落地。
+   */
+  async ExecuteGovernanceAction(ctx, actionId, executedAt) {
+    const action = await this._readGovernance(ctx, actionId);
+    if (action.status !== "APPROVED") {
+      throw new Error(`仅 APPROVED 可执行：当前状态 ${action.status}`);
+    }
+    action.status = "EXECUTED";
+    action.executedAt = String(executedAt || "");
+    action.executeTxId = ctx.stub.getTxID();
+    await this._putStateAsObject(ctx, this._governanceKey(actionId), action);
+    ctx.stub.setEvent(
+      "GovernanceExecuted",
+      Buffer.from(JSON.stringify({
+        actionId: action.actionId,
+        kind: action.kind,
+        executeTxId: action.executeTxId,
+      }))
+    );
+    return JSON.stringify(action);
+  }
+
+  /**
+   * 迭代 10：列出治理动作（可选按 status 过滤）。
+   */
+  async ListGovernanceActions(ctx, status, pageSize, bookmark) {
+    const selector = { docType: "GovernanceAction" };
+    if (status) selector.status = String(status);
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexGovernanceStatusDoc", "indexGovernanceStatus"],
+      [{ proposedAt: "desc" }]
+    );
+    return JSON.stringify(out);
+  }
 }
 
 module.exports = MedShareContract;

@@ -609,6 +609,88 @@ app.get("/api/anchor/batches", async (req, res) => {
   );
 });
 
+// ---------- 迭代 10：链上多签治理 ----------
+
+app.post("/api/governance/actions", async (req, res) => {
+  const { org, actionId, kind, payloadJson, proposedAt } = req.body || {};
+  if (!actionId || !kind) {
+    return res.status(400).json({ message: "actionId / kind 必填" });
+  }
+  try {
+    const result = await submit(org, "ProposeGovernanceAction", [
+      String(actionId),
+      String(kind),
+      String(payloadJson || "{}"),
+      String(proposedAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/governance/actions/:actionId/approve", async (req, res) => {
+  try {
+    const result = await submit(req.body.org, "ApproveGovernanceAction", [
+      String(req.params.actionId),
+      String(req.body.approvedAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/governance/actions/:actionId/reject", async (req, res) => {
+  try {
+    const result = await submit(req.body.org, "RejectGovernanceAction", [
+      String(req.params.actionId),
+      String(req.body.rejectedAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/governance/actions/:actionId/execute", async (req, res) => {
+  try {
+    const result = await submit(req.body.org, "ExecuteGovernanceAction", [
+      String(req.params.actionId),
+      String(req.body.executedAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/governance/actions/:actionId", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "GetGovernanceAction", [
+      String(req.params.actionId),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/governance/actions", async (req, res) => {
+  const org = req.query.org || "org1";
+  const status = String(req.query.status || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  await _servePagedQuery(
+    org,
+    "ListGovernanceActions",
+    [status, pageSize, bookmark],
+    { status, pageSize, bookmark },
+    res
+  );
+});
+
 // ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------
 //
 // 设计：

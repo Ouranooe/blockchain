@@ -881,4 +881,135 @@ describe("MedShareContract", () => {
       expect(out.records[1].batchId).to.equal("B-L1");
     });
   });
+
+  // ---------------- 迭代 10：链上多签治理（双 MSP endorse） ----------------
+  describe("链上多签治理（迭代 10）", () => {
+    it("Propose 后状态为 PROPOSED，含 proposerMsp", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      const raw = await contract.ProposeGovernanceAction(
+        ctx, "G-1", "UNFREEZE_RECORD", JSON.stringify({ recordId: "5" }), "2026-05-27"
+      );
+      const action = JSON.parse(raw);
+      expect(action.status).to.equal("PROPOSED");
+      expect(action.proposerMsp).to.equal("Org1MSP");
+      expect(action.kind).to.equal("UNFREEZE_RECORD");
+      expect(action.approvers).to.deep.equal([]);
+
+      const ev = ctx.stub._events.find((e) => e.name === "GovernanceProposed");
+      expect(ev).to.not.equal(undefined);
+    });
+
+    it("未知 kind 必须拒绝", async () => {
+      await expect(
+        contract.ProposeGovernanceAction(ctx, "G-2", "RANDOM_KIND", "{}", "t")
+      ).to.be.rejectedWith(/未知治理动作 kind/);
+    });
+
+    it("单 MSP 批准 → PARTIALLY_APPROVED；同 MSP 二次批准 → 抛错", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-3", "BATCH_REVOKE_PATIENT", JSON.stringify({ patientId: "1" }), "t"
+      );
+      const after1 = JSON.parse(
+        await contract.ApproveGovernanceAction(ctx, "G-3", "t")
+      );
+      expect(after1.status).to.equal("PARTIALLY_APPROVED");
+      expect(after1.approvers).to.have.lengthOf(1);
+      expect(after1.approvers[0].msp).to.equal("Org1MSP");
+      // 同 MSP 再批
+      await expect(
+        contract.ApproveGovernanceAction(ctx, "G-3", "t")
+      ).to.be.rejectedWith(/已批准过该提案/);
+    });
+
+    it("不同 MSP 第二次批准 → APPROVED；APPROVED 后再批被拒", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-4", "FORCE_DELETE_RECORD", JSON.stringify({ recordId: "9" }), "t"
+      );
+      await contract.ApproveGovernanceAction(ctx, "G-4", "t");
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      const after2 = JSON.parse(
+        await contract.ApproveGovernanceAction(ctx, "G-4", "t")
+      );
+      expect(after2.status).to.equal("APPROVED");
+      expect(new Set(after2.approvers.map((a) => a.msp)).size).to.equal(2);
+
+      // APPROVED 后再批被拒
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await expect(
+        contract.ApproveGovernanceAction(ctx, "G-4", "t")
+      ).to.be.rejectedWith(/已 APPROVED/);
+    });
+
+    it("未 APPROVED 直接 Execute → 抛错；APPROVED 后 Execute → EXECUTED", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-5", "FREEZE_RECORD", JSON.stringify({ recordId: "3" }), "t"
+      );
+      await expect(
+        contract.ExecuteGovernanceAction(ctx, "G-5", "t")
+      ).to.be.rejectedWith(/仅 APPROVED 可执行/);
+
+      await contract.ApproveGovernanceAction(ctx, "G-5", "t");
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.ApproveGovernanceAction(ctx, "G-5", "t");
+
+      const final = JSON.parse(
+        await contract.ExecuteGovernanceAction(ctx, "G-5", "t-now")
+      );
+      expect(final.status).to.equal("EXECUTED");
+      expect(final.executedAt).to.equal("t-now");
+
+      // EXECUTED 后再批/执行都拒绝
+      await expect(
+        contract.ExecuteGovernanceAction(ctx, "G-5", "t")
+      ).to.be.rejectedWith(/仅 APPROVED 可执行/);
+      await expect(
+        contract.ApproveGovernanceAction(ctx, "G-5", "t")
+      ).to.be.rejectedWith(/处于终态/);
+    });
+
+    it("REJECTED 是终态：不能再批准 / 执行", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-6", "FREEZE_RECORD", "{}", "t"
+      );
+      await contract.RejectGovernanceAction(ctx, "G-6", "t");
+      await expect(
+        contract.ApproveGovernanceAction(ctx, "G-6", "t")
+      ).to.be.rejectedWith(/处于终态/);
+      await expect(
+        contract.ExecuteGovernanceAction(ctx, "G-6", "t")
+      ).to.be.rejectedWith(/仅 APPROVED 可执行/);
+    });
+
+    it("ListGovernanceActions 富查询能按 status 过滤", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-L1", "FREEZE_RECORD", "{}", "2026-05-27T00:00:00Z"
+      );
+      await contract.ProposeGovernanceAction(
+        ctx, "G-L2", "UNFREEZE_RECORD", "{}", "2026-05-28T00:00:00Z"
+      );
+      await contract.RejectGovernanceAction(ctx, "G-L2", "t");
+
+      const proposed = JSON.parse(
+        await contract.ListGovernanceActions(ctx, "PROPOSED", "20", "")
+      );
+      expect(proposed.records).to.have.lengthOf(1);
+      expect(proposed.records[0].actionId).to.equal("G-L1");
+
+      const rejected = JSON.parse(
+        await contract.ListGovernanceActions(ctx, "REJECTED", "20", "")
+      );
+      expect(rejected.records).to.have.lengthOf(1);
+      expect(rejected.records[0].actionId).to.equal("G-L2");
+
+      const all = JSON.parse(
+        await contract.ListGovernanceActions(ctx, "", "20", "")
+      );
+      expect(all.records).to.have.lengthOf(2);
+    });
+  });
 });

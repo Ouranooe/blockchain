@@ -93,6 +93,31 @@ class AccessRequest(Base):
     revoke_tx_id = Column(String(128), nullable=True)
 
 
+class GovernanceAction(Base):
+    """迭代 10：链上多签治理动作的 MySQL 镜像。
+
+    真相在链上（key=GOV_{action_id}）；此处仅用于列表性能与前端展示。
+    每次链码状态推进后，后端把 status / approvers_json / *_tx_id 同步进 DB。
+    """
+
+    __tablename__ = "governance_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    action_id = Column(String(64), unique=True, nullable=False, index=True)
+    kind = Column(String(32), nullable=False, index=True)
+    payload_json = Column(Text, nullable=False, default="{}")
+    proposer_id = Column(Integer, nullable=True, index=True)
+    proposer_msp = Column(String(32), nullable=True)
+    status = Column(String(32), nullable=False, default="PROPOSED", index=True)
+    approvers_json = Column(Text, nullable=False, default="[]")
+    propose_tx_id = Column(String(128), nullable=True)
+    execute_tx_id = Column(String(128), nullable=True)
+    reject_tx_id = Column(String(128), nullable=True)
+    proposed_at = Column(DateTime, nullable=False, server_default=func.now())
+    executed_at = Column(DateTime, nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+
+
 class MerkleAnchorBatch(Base):
     """迭代 9：Merkle 批量锚定。每条记录对应一次 AnchorRecordBatch 链上交易。
 

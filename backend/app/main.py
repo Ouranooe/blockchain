@@ -28,11 +28,16 @@ from .metrics import CHAIN_CALLS, WS_CONNECTIONS, install_metrics
 from .gateway import (
     anchor_record_batch,
     approve_access_request,
+    approve_governance_action,
     check_gateway_ready,
     create_access_request,
     create_record_evidence,
+    execute_governance_action,
     get_anchor_batch,
+    get_governance_action,
     list_anchor_batches,
+    list_governance_actions,
+    propose_governance_action,
     query_access_request,
     query_access_request_history,
     query_pending_requests_for_patient,
@@ -41,12 +46,20 @@ from .gateway import (
     query_records_by_date,
     query_records_by_hospital,
     reject_access_request,
+    reject_governance_action,
     revise_record_evidence,
     revoke_access_request,
     verify_record_inclusion,
 )
 from . import merkle as merkle_util
-from .models import AccessRequest, AuditEventRow, MedicalRecord, MerkleAnchorBatch, User
+from .models import (
+    AccessRequest,
+    AuditEventRow,
+    GovernanceAction,
+    MedicalRecord,
+    MerkleAnchorBatch,
+    User,
+)
 from .schemas import (
     AccessRequestChainHistory,
     AccessRequestCreate,
@@ -61,6 +74,9 @@ from .schemas import (
     ChainRecordBrief,
     ChainRecordPage,
     ChangePasswordRequest,
+    GovernanceActionInfo,
+    GovernanceApprover,
+    GovernanceProposeRequest,
     InclusionVerifyRequest,
     InclusionVerifyResponse,
     LoginRequest,
@@ -1516,3 +1532,280 @@ def list_anchor_batches_api(
         .all()
     )
     return [_batch_to_info(b) for b in batches]
+
+
+# ---------------- 迭代 10：链上多签治理（双 MSP endorse） ----------------
+
+
+def _gov_action_to_info(row: GovernanceAction) -> GovernanceActionInfo:
+    try:
+        payload = json.loads(row.payload_json) if row.payload_json else {}
+    except Exception:
+        payload = {}
+    try:
+        approvers_raw = json.loads(row.approvers_json) if row.approvers_json else []
+    except Exception:
+        approvers_raw = []
+    approvers = [
+        GovernanceApprover(
+            msp=a.get("msp", ""),
+            approved_at=a.get("approvedAt"),
+            tx_id=a.get("txId"),
+        )
+        for a in approvers_raw
+        if isinstance(a, dict)
+    ]
+    return GovernanceActionInfo(
+        action_id=row.action_id,
+        kind=row.kind,
+        payload=payload,
+        proposer_id=row.proposer_id,
+        proposer_msp=row.proposer_msp,
+        status=row.status,
+        approvers=approvers,
+        propose_tx_id=row.propose_tx_id,
+        execute_tx_id=row.execute_tx_id,
+        reject_tx_id=row.reject_tx_id,
+        proposed_at=row.proposed_at,
+        executed_at=row.executed_at,
+        rejected_at=row.rejected_at,
+    )
+
+
+def _sync_governance_from_chain_result(
+    db: Session, row: GovernanceAction, chain_result: dict
+) -> None:
+    """从链码返回的最新动作 JSON 同步到 DB 镜像。"""
+    result = chain_result.get("result") if isinstance(chain_result, dict) else None
+    if not isinstance(result, dict):
+        return
+    row.status = result.get("status", row.status)
+    approvers = result.get("approvers") or []
+    row.approvers_json = json.dumps(approvers, ensure_ascii=False)
+    if result.get("executeTxId"):
+        row.execute_tx_id = result.get("executeTxId")
+    if result.get("rejectTxId"):
+        row.reject_tx_id = result.get("rejectTxId")
+    if result.get("executedAt"):
+        try:
+            row.executed_at = datetime.fromisoformat(
+                result["executedAt"].replace("Z", "+00:00")
+            )
+        except Exception:
+            pass
+    if result.get("rejectedAt"):
+        try:
+            row.rejected_at = datetime.fromisoformat(
+                result["rejectedAt"].replace("Z", "+00:00")
+            )
+        except Exception:
+            pass
+    db.commit()
+    db.refresh(row)
+
+
+def _proposer_org_to_gateway(user: User) -> str:
+    """根据用户的 msp_org 映射到 gateway 的 org 参数（org1 / org2）。
+    没有 msp_org 时（如 admin）默认走 org1。"""
+    msp = (user.msp_org or "").lower()
+    return "org2" if "org2" in msp else "org1"
+
+
+@app.post(
+    f"{settings.API_PREFIX}/governance/actions",
+    response_model=GovernanceActionInfo,
+)
+def propose_governance(
+    payload: GovernanceProposeRequest,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 10：admin 发起治理提案（链上 PROPOSED）。"""
+    existing = (
+        db.query(GovernanceAction)
+        .filter(GovernanceAction.action_id == payload.action_id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="action_id 已存在")
+
+    org = _proposer_org_to_gateway(current_user)
+    now = datetime.now(timezone.utc)
+    try:
+        chain_result = propose_governance_action(
+            action_id=payload.action_id,
+            kind=payload.kind,
+            payload=payload.payload,
+            proposed_at=now.isoformat(),
+            org=org,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    row = GovernanceAction(
+        action_id=payload.action_id,
+        kind=payload.kind,
+        payload_json=json.dumps(payload.payload, ensure_ascii=False),
+        proposer_id=current_user.id,
+        proposer_msp=current_user.msp_org,
+        status="PROPOSED",
+        approvers_json="[]",
+        propose_tx_id=chain_result.get("txId"),
+        proposed_at=now.replace(tzinfo=None),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    _sync_governance_from_chain_result(db, row, chain_result)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="GovernanceProposed",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            tx_id=row.propose_tx_id,
+            message=f"治理提案：{payload.kind} #{payload.action_id}",
+            payload={"action_id": payload.action_id, "kind": payload.kind},
+        )
+    )
+    return _gov_action_to_info(row)
+
+
+def _load_governance(db: Session, action_id: str) -> GovernanceAction:
+    row = (
+        db.query(GovernanceAction)
+        .filter(GovernanceAction.action_id == action_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="治理动作不存在")
+    return row
+
+
+@app.post(
+    f"{settings.API_PREFIX}/governance/actions/{{action_id}}/approve",
+    response_model=GovernanceActionInfo,
+)
+def approve_governance(
+    action_id: str,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 10：admin 批准治理动作。链码守卫双 MSP 不重复 / 状态合法。"""
+    row = _load_governance(db, action_id)
+    org = _proposer_org_to_gateway(current_user)
+    try:
+        chain_result = approve_governance_action(
+            action_id=action_id,
+            approved_at=datetime.now(timezone.utc).isoformat(),
+            org=org,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    _sync_governance_from_chain_result(db, row, chain_result)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="GovernanceApproved",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            tx_id=chain_result.get("txId"),
+            message=f"治理批准：#{action_id}（当前状态 {row.status}）",
+            payload={"action_id": action_id, "status": row.status},
+        )
+    )
+    return _gov_action_to_info(row)
+
+
+@app.post(
+    f"{settings.API_PREFIX}/governance/actions/{{action_id}}/reject",
+    response_model=GovernanceActionInfo,
+)
+def reject_governance(
+    action_id: str,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    row = _load_governance(db, action_id)
+    org = _proposer_org_to_gateway(current_user)
+    try:
+        chain_result = reject_governance_action(
+            action_id=action_id,
+            rejected_at=datetime.now(timezone.utc).isoformat(),
+            org=org,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    _sync_governance_from_chain_result(db, row, chain_result)
+    _safe_emit(
+        AuditPayload(
+            event_type="GovernanceRejected",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            tx_id=chain_result.get("txId"),
+            message=f"治理拒绝：#{action_id}",
+        )
+    )
+    return _gov_action_to_info(row)
+
+
+@app.post(
+    f"{settings.API_PREFIX}/governance/actions/{{action_id}}/execute",
+    response_model=GovernanceActionInfo,
+)
+def execute_governance(
+    action_id: str,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    row = _load_governance(db, action_id)
+    org = _proposer_org_to_gateway(current_user)
+    try:
+        chain_result = execute_governance_action(
+            action_id=action_id,
+            executed_at=datetime.now(timezone.utc).isoformat(),
+            org=org,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    _sync_governance_from_chain_result(db, row, chain_result)
+    _safe_emit(
+        AuditPayload(
+            event_type="GovernanceExecuted",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            tx_id=row.execute_tx_id,
+            message=f"治理执行：#{action_id}（kind={row.kind}）",
+            payload={"action_id": action_id, "kind": row.kind},
+        )
+    )
+    return _gov_action_to_info(row)
+
+
+@app.get(
+    f"{settings.API_PREFIX}/governance/actions",
+    response_model=List[GovernanceActionInfo],
+)
+def list_governance(
+    status: Optional[str] = None,
+    _current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    q = db.query(GovernanceAction)
+    if status:
+        q = q.filter(GovernanceAction.status == status)
+    rows = q.order_by(GovernanceAction.proposed_at.desc()).all()
+    return [_gov_action_to_info(r) for r in rows]
+
+
+@app.get(
+    f"{settings.API_PREFIX}/governance/actions/{{action_id}}",
+    response_model=GovernanceActionInfo,
+)
+def get_governance(
+    action_id: str,
+    _current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    row = _load_governance(db, action_id)
+    return _gov_action_to_info(row)

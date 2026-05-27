@@ -329,3 +329,78 @@ def list_anchor_batches(
         "bookmark": bookmark or "",
     }
     return _get(f"/anchor/batches?{urlencode(params)}")
+
+
+# ---------- 迭代 10：链上多签治理 ----------
+
+def propose_governance_action(
+    *,
+    action_id: str,
+    kind: str,
+    payload: dict,
+    proposed_at: str,
+    org: str = "org1",
+) -> dict:
+    import json as _json
+
+    return _post(
+        "/governance/actions",
+        {
+            "org": org,
+            "actionId": action_id,
+            "kind": kind,
+            "payloadJson": _json.dumps(payload or {}),
+            "proposedAt": proposed_at,
+        },
+    )
+
+
+def approve_governance_action(
+    *, action_id: str, approved_at: str, org: str = "org1"
+) -> dict:
+    return _post(
+        f"/governance/actions/{action_id}/approve",
+        {"org": org, "approvedAt": approved_at},
+    )
+
+
+def reject_governance_action(
+    *, action_id: str, rejected_at: str, org: str = "org1"
+) -> dict:
+    return _post(
+        f"/governance/actions/{action_id}/reject",
+        {"org": org, "rejectedAt": rejected_at},
+    )
+
+
+def execute_governance_action(
+    *, action_id: str, executed_at: str, org: str = "org1"
+) -> dict:
+    return _post(
+        f"/governance/actions/{action_id}/execute",
+        {"org": org, "executedAt": executed_at},
+    )
+
+
+def get_governance_action(action_id: str, *, org: str = "org1") -> dict:
+    from urllib.parse import urlencode
+
+    return _get(f"/governance/actions/{action_id}?{urlencode({'org': org})}")
+
+
+def list_governance_actions(
+    *,
+    status: str = "",
+    page_size: int = 20,
+    bookmark: str = "",
+    org: str = "org1",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "org": org,
+        "status": status,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/governance/actions?{urlencode(params)}")

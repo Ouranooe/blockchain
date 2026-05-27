@@ -259,3 +259,36 @@ class InclusionVerifyResponse(BaseModel):
     batch_id: str
     leaf_count: int
     tx_id: Optional[str] = None
+
+
+# ---------------- 迭代 10：链上多签治理 ----------------
+
+
+class GovernanceProposeRequest(BaseModel):
+    action_id: str = Field(min_length=1, max_length=64)
+    kind: str = Field(
+        pattern=r"^(FREEZE_RECORD|UNFREEZE_RECORD|BATCH_REVOKE_PATIENT|FORCE_DELETE_RECORD)$"
+    )
+    payload: dict = Field(default_factory=dict)
+
+
+class GovernanceApprover(BaseModel):
+    msp: str
+    approved_at: Optional[str] = None
+    tx_id: Optional[str] = None
+
+
+class GovernanceActionInfo(BaseModel):
+    action_id: str
+    kind: str
+    payload: dict = Field(default_factory=dict)
+    proposer_id: Optional[int] = None
+    proposer_msp: Optional[str] = None
+    status: str
+    approvers: list[GovernanceApprover] = Field(default_factory=list)
+    propose_tx_id: Optional[str] = None
+    execute_tx_id: Optional[str] = None
+    reject_tx_id: Optional[str] = None
+    proposed_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
