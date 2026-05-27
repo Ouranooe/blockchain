@@ -26,10 +26,13 @@ from .events import AuditEvent as AuditPayload, bus
 from .files import router as files_router
 from .metrics import CHAIN_CALLS, WS_CONNECTIONS, install_metrics
 from .gateway import (
+    anchor_record_batch,
     approve_access_request,
+    check_gateway_ready,
     create_access_request,
     create_record_evidence,
-    check_gateway_ready,
+    get_anchor_batch,
+    list_anchor_batches,
     query_access_request,
     query_access_request_history,
     query_pending_requests_for_patient,
@@ -40,13 +43,17 @@ from .gateway import (
     reject_access_request,
     revise_record_evidence,
     revoke_access_request,
+    verify_record_inclusion,
 )
-from .models import AccessRequest, AuditEventRow, MedicalRecord, User
+from . import merkle as merkle_util
+from .models import AccessRequest, AuditEventRow, MedicalRecord, MerkleAnchorBatch, User
 from .schemas import (
     AccessRequestChainHistory,
     AccessRequestCreate,
     AccessRequestItem,
     AccessRequestReview,
+    AnchorBatchInfo,
+    AnchorRunResult,
     AuditEvent,
     ChainHistoryEntry,
     ChainPendingRequestBrief,
@@ -54,13 +61,17 @@ from .schemas import (
     ChainRecordBrief,
     ChainRecordPage,
     ChangePasswordRequest,
+    InclusionVerifyRequest,
+    InclusionVerifyResponse,
     LoginRequest,
     LoginResponse,
     MedicalRecordCreate,
     MedicalRecordItem,
     MedicalRecordRevise,
+    MerkleProofStep,
     RecordChainHistory,
     RecordHistory,
+    RecordInclusionProof,
     RecordVersionItem,
     RegisterRequest,
     SimpleMessage,
@@ -1329,3 +1340,179 @@ def list_audit_events(
             }
         )
     return out
+
+
+# ---------------- 迭代 9：Merkle 批量锚定 + 链上包含证明 ----------------
+
+
+def _record_leaf_hash(record: MedicalRecord) -> str:
+    return merkle_util.leaf_hash(record.id, record.content_hash)
+
+
+def _batch_to_info(batch: MerkleAnchorBatch) -> AnchorBatchInfo:
+    return AnchorBatchInfo(
+        batch_id=batch.batch_id,
+        merkle_root=batch.merkle_root,
+        leaf_count=batch.leaf_count,
+        record_id_low=batch.record_id_low,
+        record_id_high=batch.record_id_high,
+        tx_id=batch.tx_id,
+        created_at=batch.created_at,
+    )
+
+
+@app.post(f"{settings.API_PREFIX}/anchor/run", response_model=AnchorRunResult)
+def run_anchor(
+    _current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 9：把所有"未锚定"的最新版病历聚合成一个 Merkle 批次上链。
+    幂等：无新增病历时 anchored=0，不上链。"""
+    pending = (
+        db.query(MedicalRecord)
+        .filter(MedicalRecord.anchor_batch_id.is_(None))
+        .order_by(MedicalRecord.id.asc())
+        .all()
+    )
+    if not pending:
+        return AnchorRunResult(anchored=0, batch=None, detail="无未锚定病历")
+
+    leaves = [_record_leaf_hash(r) for r in pending]
+    root = merkle_util.compute_merkle_root(leaves)
+    now = datetime.now(timezone.utc)
+    batch_id = f"B-{now.strftime('%Y%m%d%H%M%S')}-{pending[-1].id}"
+
+    try:
+        chain_result = anchor_record_batch(
+            batch_id=batch_id,
+            merkle_root=root,
+            leaf_count=len(leaves),
+            created_at=now.isoformat(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    batch = MerkleAnchorBatch(
+        batch_id=batch_id,
+        merkle_root=root,
+        leaf_count=len(leaves),
+        record_id_low=pending[0].id,
+        record_id_high=pending[-1].id,
+        tx_id=chain_result.get("txId"),
+    )
+    db.add(batch)
+    db.flush()
+
+    for idx, record in enumerate(pending):
+        record.anchor_batch_id = batch_id
+        record.anchor_leaf_index = idx
+    db.commit()
+    db.refresh(batch)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="BatchAnchored",
+            actor_id=_current_user.id,
+            actor_role=_current_user.role,
+            tx_id=batch.tx_id,
+            message=f"批量锚定 {len(leaves)} 条病历到链上（batch={batch_id}）",
+            payload={"batch_id": batch_id, "leaf_count": len(leaves)},
+        )
+    )
+    return AnchorRunResult(
+        anchored=len(leaves),
+        batch=_batch_to_info(batch),
+        detail="ok",
+    )
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/{{record_id}}/proof",
+    response_model=RecordInclusionProof,
+)
+def record_inclusion_proof(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """迭代 9：返回某条病历在其批次中的 Merkle 包含证明 + 链上 TxID。
+    任何"有权查看该病历"的角色都能拿到证明（admin / 归属患者 / 上传医院 / 被授权医院）。"""
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+    if not _authorize_record_view(current_user, record, db):
+        raise HTTPException(status_code=403, detail="无权限查看该病历")
+    if not record.anchor_batch_id:
+        raise HTTPException(status_code=409, detail="该病历尚未被批量锚定")
+
+    batch = (
+        db.query(MerkleAnchorBatch)
+        .filter(MerkleAnchorBatch.batch_id == record.anchor_batch_id)
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=500, detail="锚定批次元数据缺失")
+
+    # 重建批次叶子集合（按 anchor_leaf_index 顺序）
+    leaves_in_batch = (
+        db.query(MedicalRecord)
+        .filter(MedicalRecord.anchor_batch_id == record.anchor_batch_id)
+        .order_by(MedicalRecord.anchor_leaf_index.asc())
+        .all()
+    )
+    leaf_hashes = [_record_leaf_hash(r) for r in leaves_in_batch]
+    if record.anchor_leaf_index is None:
+        raise HTTPException(status_code=500, detail="anchor_leaf_index 缺失（数据损坏）")
+    idx = record.anchor_leaf_index
+    proof_steps = merkle_util.compute_proof(leaf_hashes, idx)
+
+    leaf_hex = leaf_hashes[idx]
+    return RecordInclusionProof(
+        record_id=record.id,
+        leaf_hash=leaf_hex,
+        batch=_batch_to_info(batch),
+        proof=[MerkleProofStep(**step) for step in proof_steps],
+    )
+
+
+@app.post(
+    f"{settings.API_PREFIX}/anchor/verify",
+    response_model=InclusionVerifyResponse,
+)
+def verify_inclusion(
+    payload: InclusionVerifyRequest,
+    _current_user: User = Depends(get_current_user),
+):
+    """迭代 9：链上验证一份 Merkle 包含证明（任何登录用户都可用）。"""
+    proof_list = [step.model_dump() for step in payload.proof]
+    try:
+        chain_result = verify_record_inclusion(
+            batch_id=payload.batch_id,
+            leaf_hash=payload.leaf_hash,
+            proof=proof_list,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    result = chain_result.get("result", {}) if isinstance(chain_result, dict) else {}
+    return InclusionVerifyResponse(
+        ok=bool(result.get("ok")),
+        recomputed_root=result.get("recomputedRoot", ""),
+        anchored_root=result.get("anchoredRoot", ""),
+        batch_id=result.get("batchId", payload.batch_id),
+        leaf_count=int(result.get("leafCount", 0) or 0),
+        tx_id=result.get("txId"),
+    )
+
+
+@app.get(f"{settings.API_PREFIX}/anchor/batches", response_model=List[AnchorBatchInfo])
+def list_anchor_batches_api(
+    _current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 9：管理员列出所有锚定批次（DB 镜像，避免每次都查链）。"""
+    batches = (
+        db.query(MerkleAnchorBatch)
+        .order_by(MerkleAnchorBatch.created_at.desc())
+        .all()
+    )
+    return [_batch_to_info(b) for b in batches]

@@ -213,3 +213,49 @@ class AuditEvent(BaseModel):
     tx_id: Optional[str] = None
     operator: str
     created_at: datetime
+
+
+# ---------------- 迭代 9：Merkle 批量锚定 ----------------
+
+
+class AnchorBatchInfo(BaseModel):
+    batch_id: str
+    merkle_root: str
+    leaf_count: int
+    record_id_low: Optional[int] = None
+    record_id_high: Optional[int] = None
+    tx_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class AnchorRunResult(BaseModel):
+    anchored: int
+    batch: Optional[AnchorBatchInfo] = None
+    detail: str = ""
+
+
+class MerkleProofStep(BaseModel):
+    hash: str
+    position: str  # "left" 或 "right"
+
+
+class RecordInclusionProof(BaseModel):
+    record_id: int
+    leaf_hash: str
+    batch: AnchorBatchInfo
+    proof: list[MerkleProofStep]
+
+
+class InclusionVerifyRequest(BaseModel):
+    batch_id: str
+    leaf_hash: str
+    proof: list[MerkleProofStep]
+
+
+class InclusionVerifyResponse(BaseModel):
+    ok: bool
+    recomputed_root: str
+    anchored_root: str
+    batch_id: str
+    leaf_count: int
+    tx_id: Optional[str] = None

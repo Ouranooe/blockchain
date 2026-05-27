@@ -44,6 +44,9 @@ class MedicalRecord(Base):
     file_path = Column(String(512), nullable=True)    # 密文落盘位置（相对 STORAGE_DIR）
     file_nonce_b64 = Column(String(64), nullable=True)
     file_tag_b64 = Column(String(64), nullable=True)
+    # 迭代 9：Merkle 批量锚定的批次归属（NULL 表示未锚定）
+    anchor_batch_id = Column(String(64), nullable=True, index=True)
+    anchor_leaf_index = Column(Integer, nullable=True)
 
 
 class AuditEventRow(Base):
@@ -88,3 +91,22 @@ class AccessRequest(Base):
     max_reads = Column(Integer, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_tx_id = Column(String(128), nullable=True)
+
+
+class MerkleAnchorBatch(Base):
+    """迭代 9：Merkle 批量锚定。每条记录对应一次 AnchorRecordBatch 链上交易。
+
+    叶子的 record_id_low / record_id_high 是该批次包含的病历 id 闭区间（仅用于
+    审计 / 展示，真实归属由 medical_records.anchor_batch_id 决定）。
+    """
+
+    __tablename__ = "merkle_anchor_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(String(64), unique=True, nullable=False, index=True)
+    merkle_root = Column(String(64), nullable=False)
+    leaf_count = Column(Integer, nullable=False)
+    record_id_low = Column(Integer, nullable=True)
+    record_id_high = Column(Integer, nullable=True)
+    tx_id = Column(String(128), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())

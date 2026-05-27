@@ -548,6 +548,67 @@ app.get("/api/access-requests/query/pending-for-patient", async (req, res) => {
   );
 });
 
+// ---------- 迭代 9：Merkle 批量锚定 + 链上包含证明 ----------
+
+app.post("/api/anchor/batches", async (req, res) => {
+  const { org, batchId, merkleRoot, leafCount, createdAt } = req.body || {};
+  if (!batchId || !merkleRoot || !leafCount) {
+    return res.status(400).json({ message: "batchId / merkleRoot / leafCount 必填" });
+  }
+  try {
+    const result = await submit(org, "AnchorRecordBatch", [
+      String(batchId),
+      String(merkleRoot),
+      String(leafCount),
+      String(createdAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/anchor/batches/:batchId", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "GetAnchorBatch", [String(req.params.batchId)]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/anchor/verify", async (req, res) => {
+  const { org, batchId, leafHash, proof } = req.body || {};
+  if (!batchId || !leafHash || proof === undefined) {
+    return res.status(400).json({ message: "batchId / leafHash / proof 必填" });
+  }
+  try {
+    const proofJson = typeof proof === "string" ? proof : JSON.stringify(proof);
+    const result = await evaluate(org, "VerifyRecordInclusion", [
+      String(batchId),
+      String(leafHash),
+      proofJson,
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/anchor/batches", async (req, res) => {
+  const org = req.query.org || "org1";
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  await _servePagedQuery(
+    org,
+    "ListAnchorBatches",
+    [pageSize, bookmark],
+    { pageSize, bookmark },
+    res
+  );
+});
+
 // ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------
 //
 // 设计：

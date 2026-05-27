@@ -267,3 +267,65 @@ def query_pending_requests_for_patient(
         "bookmark": bookmark or "",
     }
     return _get(f"/access-requests/query/pending-for-patient?{urlencode(params)}")
+
+
+# ---------- 迭代 9：Merkle 批量锚定 ----------
+
+def anchor_record_batch(
+    *,
+    batch_id: str,
+    merkle_root: str,
+    leaf_count: int,
+    created_at: str,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        "/anchor/batches",
+        {
+            "org": org,
+            "batchId": batch_id,
+            "merkleRoot": merkle_root,
+            "leafCount": int(leaf_count),
+            "createdAt": created_at,
+        },
+    )
+
+
+def get_anchor_batch(batch_id: str, *, org: str = "org1") -> dict:
+    from urllib.parse import urlencode
+
+    return _get(f"/anchor/batches/{batch_id}?{urlencode({'org': org})}")
+
+
+def verify_record_inclusion(
+    *,
+    batch_id: str,
+    leaf_hash: str,
+    proof: list,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        "/anchor/verify",
+        {
+            "org": org,
+            "batchId": batch_id,
+            "leafHash": leaf_hash,
+            "proof": proof,
+        },
+    )
+
+
+def list_anchor_batches(
+    *,
+    page_size: int = 20,
+    bookmark: str = "",
+    org: str = "org1",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "org": org,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/anchor/batches?{urlencode(params)}")

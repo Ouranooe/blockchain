@@ -693,4 +693,192 @@ describe("MedShareContract", () => {
       ).to.be.rejectedWith(/非法状态跃迁/);
     });
   });
+
+  // ---------------- 迭代 9：Merkle 批量锚定 + 链上包含证明 ----------------
+  describe("Merkle 批量锚定（迭代 9）", () => {
+    const crypto = require("crypto");
+    const sha256Hex = (buf) =>
+      crypto.createHash("sha256").update(buf).digest("hex");
+    const hashPair = (l, r) =>
+      sha256Hex(Buffer.concat([Buffer.from(l, "hex"), Buffer.from(r, "hex")]));
+
+    // 给定叶子哈希数组（hex），返回 {root, proofs[][]}
+    function buildMerkleTree(leaves) {
+      if (leaves.length === 0) return { root: "", proofs: [] };
+      let level = leaves.slice();
+      const proofs = leaves.map(() => []);
+      const indices = leaves.map((_, i) => i);
+      while (level.length > 1) {
+        if (level.length % 2 === 1) {
+          level.push(level[level.length - 1]); // 奇数补自身
+        }
+        const nextLevel = [];
+        const nextIndices = [];
+        for (let i = 0; i < level.length; i += 2) {
+          const L = level[i];
+          const R = level[i + 1];
+          // 找到 indices 中映射到当前这两个 slot 的所有原叶子，
+          // 给它们追加一步证明
+          for (let k = 0; k < indices.length; k++) {
+            if (indices[k] === i) {
+              proofs[k].push({ hash: R, position: "right" });
+            } else if (indices[k] === i + 1) {
+              proofs[k].push({ hash: L, position: "left" });
+            }
+          }
+          nextLevel.push(hashPair(L, R));
+          // indices 折半
+          for (let k = 0; k < indices.length; k++) {
+            if (indices[k] === i || indices[k] === i + 1) {
+              nextIndices[k] = i / 2;
+            }
+          }
+        }
+        // 把 indices 替换为折半后的值
+        for (let k = 0; k < indices.length; k++) {
+          indices[k] = nextIndices[k];
+        }
+        level = nextLevel;
+      }
+      return { root: level[0], proofs };
+    }
+
+    it("锚定一个 batch 后 GetAnchorBatch 能取回所有字段", async () => {
+      const root = sha256Hex(Buffer.from("only-leaf"));
+      const raw = await contract.AnchorRecordBatch(
+        ctx, "B-001", root, "1", "2026-05-27T00:00:00Z"
+      );
+      const batch = JSON.parse(raw);
+      expect(batch.batchId).to.equal("B-001");
+      expect(batch.merkleRoot).to.equal(root);
+      expect(batch.leafCount).to.equal(1);
+      expect(batch.txId).to.equal("tx-test-0001");
+
+      const got = JSON.parse(await contract.GetAnchorBatch(ctx, "B-001"));
+      expect(got).to.deep.equal(batch);
+
+      // 触发 BatchAnchored 事件
+      const ev = ctx.stub._events.find((e) => e.name === "BatchAnchored");
+      expect(ev).to.not.equal(undefined);
+      expect(JSON.parse(ev.payload.toString("utf8")).leafCount).to.equal(1);
+    });
+
+    it("单叶子情况下根 == 叶子哈希，且空 proof 验证通过", async () => {
+      const leaf = sha256Hex(Buffer.from("hello"));
+      await contract.AnchorRecordBatch(ctx, "B-002", leaf, "1", "2026-05-27T00:00:00Z");
+      const result = JSON.parse(
+        await contract.VerifyRecordInclusion(ctx, "B-002", leaf, "[]")
+      );
+      expect(result.ok).to.equal(true);
+      expect(result.recomputedRoot).to.equal(leaf);
+    });
+
+    it("2/3/8 叶子的 proof 全部 verify 为 true", async () => {
+      // 2 叶子
+      let leaves = [
+        sha256Hex(Buffer.from("a")),
+        sha256Hex(Buffer.from("b")),
+      ];
+      let tree = buildMerkleTree(leaves);
+      await contract.AnchorRecordBatch(ctx, "B-2", tree.root, "2", "t");
+      for (let i = 0; i < leaves.length; i++) {
+        const r = JSON.parse(
+          await contract.VerifyRecordInclusion(
+            ctx, "B-2", leaves[i], JSON.stringify(tree.proofs[i])
+          )
+        );
+        expect(r.ok).to.equal(true);
+      }
+
+      // 3 叶子（奇数补）
+      leaves = [
+        sha256Hex(Buffer.from("a")),
+        sha256Hex(Buffer.from("b")),
+        sha256Hex(Buffer.from("c")),
+      ];
+      tree = buildMerkleTree(leaves);
+      await contract.AnchorRecordBatch(ctx, "B-3", tree.root, "3", "t");
+      for (let i = 0; i < leaves.length; i++) {
+        const r = JSON.parse(
+          await contract.VerifyRecordInclusion(
+            ctx, "B-3", leaves[i], JSON.stringify(tree.proofs[i])
+          )
+        );
+        expect(r.ok).to.equal(true);
+      }
+
+      // 8 叶子
+      leaves = Array.from({ length: 8 }, (_, i) =>
+        sha256Hex(Buffer.from(`leaf-${i}`))
+      );
+      tree = buildMerkleTree(leaves);
+      await contract.AnchorRecordBatch(ctx, "B-8", tree.root, "8", "t");
+      for (let i = 0; i < leaves.length; i++) {
+        const r = JSON.parse(
+          await contract.VerifyRecordInclusion(
+            ctx, "B-8", leaves[i], JSON.stringify(tree.proofs[i])
+          )
+        );
+        expect(r.ok).to.equal(true, `leaf ${i} 验证失败`);
+      }
+    });
+
+    it("篡改 proof 中任一兄弟 hash → verify 返回 false", async () => {
+      const leaves = Array.from({ length: 4 }, (_, i) =>
+        sha256Hex(Buffer.from(`x-${i}`))
+      );
+      const tree = buildMerkleTree(leaves);
+      await contract.AnchorRecordBatch(ctx, "B-T", tree.root, "4", "t");
+
+      // 篡改第一个 proof 的第一个兄弟（任意翻位）
+      const tamperedProof = JSON.parse(JSON.stringify(tree.proofs[0]));
+      const orig = tamperedProof[0].hash;
+      tamperedProof[0].hash =
+        (orig.startsWith("a") ? "b" : "a") + orig.slice(1);
+      const r = JSON.parse(
+        await contract.VerifyRecordInclusion(
+          ctx, "B-T", leaves[0], JSON.stringify(tamperedProof)
+        )
+      );
+      expect(r.ok).to.equal(false);
+      expect(r.recomputedRoot).to.not.equal(tree.root);
+    });
+
+    it("未知 batchId → GetAnchorBatch / VerifyRecordInclusion 抛错", async () => {
+      await expect(
+        contract.GetAnchorBatch(ctx, "no-such")
+      ).to.be.rejectedWith(/not found/);
+      await expect(
+        contract.VerifyRecordInclusion(
+          ctx, "no-such", sha256Hex(Buffer.from("x")), "[]"
+        )
+      ).to.be.rejectedWith(/not found/);
+    });
+
+    it("重复锚定相同 batchId / 非法 merkleRoot / 非法 leafCount 全部抛错", async () => {
+      const root = sha256Hex(Buffer.from("z"));
+      await contract.AnchorRecordBatch(ctx, "B-D", root, "1", "t");
+      await expect(
+        contract.AnchorRecordBatch(ctx, "B-D", root, "1", "t")
+      ).to.be.rejectedWith(/already anchored/);
+      await expect(
+        contract.AnchorRecordBatch(ctx, "B-X", "not-hex", "1", "t")
+      ).to.be.rejectedWith(/64 位十六进制/);
+      await expect(
+        contract.AnchorRecordBatch(ctx, "B-Y", root, "0", "t")
+      ).to.be.rejectedWith(/正整数/);
+    });
+
+    it("ListAnchorBatches 富查询能列出所有锚定批次（按 createdAt desc）", async () => {
+      const root = sha256Hex(Buffer.from("a"));
+      await contract.AnchorRecordBatch(ctx, "B-L1", root, "1", "2026-05-27T00:00:00Z");
+      await contract.AnchorRecordBatch(ctx, "B-L2", root, "1", "2026-05-28T00:00:00Z");
+      const out = JSON.parse(
+        await contract.ListAnchorBatches(ctx, "20", "")
+      );
+      expect(out.records).to.have.lengthOf(2);
+      expect(out.records[0].batchId).to.equal("B-L2"); // desc by createdAt
+      expect(out.records[1].batchId).to.equal("B-L1");
+    });
+  });
 });

@@ -460,6 +460,73 @@ def client(db_engine, db_session, monkeypatch):
     def stub_check_gateway_ready():
         return {"status": "ready", "checks": [{"org": "org1", "status": "ready"}]}
 
+    # 迭代 9：Merkle 锚定 stubs（链下 batch 表 + 链上验证模拟）
+    chain_store["anchors"] = {}  # batchId -> {merkleRoot, leafCount, txId, createdAt}
+
+    def stub_anchor_record_batch(**kwargs):
+        batch_id = str(kwargs["batch_id"])
+        if batch_id in chain_store["anchors"]:
+            raise RuntimeError(f"Batch {batch_id} already anchored")
+        merkle_root = str(kwargs["merkle_root"]).lower()
+        leaf_count = int(kwargs["leaf_count"])
+        tx_id = f"anchor-{batch_id}"
+        chain_store["anchors"][batch_id] = {
+            "batchId": batch_id,
+            "merkleRoot": merkle_root,
+            "leafCount": leaf_count,
+            "createdAt": kwargs.get("created_at", ""),
+            "txId": tx_id,
+        }
+        return {"txId": tx_id, "result": chain_store["anchors"][batch_id]}
+
+    def stub_get_anchor_batch(batch_id, *, org="org1"):
+        batch_id = str(batch_id)
+        if batch_id not in chain_store["anchors"]:
+            raise RuntimeError(f"Batch {batch_id} not found")
+        return {"result": chain_store["anchors"][batch_id]}
+
+    def stub_verify_record_inclusion(**kwargs):
+        batch_id = str(kwargs["batch_id"])
+        if batch_id not in chain_store["anchors"]:
+            raise RuntimeError(f"Batch {batch_id} not found")
+        anchored = chain_store["anchors"][batch_id]
+        # 复用后端 merkle 模块做完全一致的链上语义重算
+        from app import merkle as _m
+
+        current = str(kwargs["leaf_hash"]).lower()
+        proof = kwargs.get("proof") or []
+        for step in proof:
+            sib = str(step.get("hash", "")).lower()
+            pos = step.get("position")
+            if pos == "right":
+                current = _m.hash_pair(current, sib)
+            elif pos == "left":
+                current = _m.hash_pair(sib, current)
+            else:
+                raise RuntimeError("proof.position 必须为 'left' 或 'right'")
+        ok = current == anchored["merkleRoot"]
+        return {
+            "result": {
+                "ok": ok,
+                "recomputedRoot": current,
+                "anchoredRoot": anchored["merkleRoot"],
+                "batchId": batch_id,
+                "leafCount": anchored["leafCount"],
+                "txId": anchored["txId"],
+            }
+        }
+
+    def stub_list_anchor_batches(**kwargs):
+        ordered = sorted(
+            chain_store["anchors"].values(),
+            key=lambda b: b.get("createdAt", ""),
+            reverse=True,
+        )
+        out = _rich_paginate(
+            ordered, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
     for target in (gateway_module, main_module, files_module):
         if hasattr(target, "create_record_evidence"):
             monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
@@ -501,6 +568,16 @@ def client(db_engine, db_session, monkeypatch):
             )
         if hasattr(target, "check_gateway_ready"):
             monkeypatch.setattr(target, "check_gateway_ready", stub_check_gateway_ready)
+        if hasattr(target, "anchor_record_batch"):
+            monkeypatch.setattr(target, "anchor_record_batch", stub_anchor_record_batch)
+        if hasattr(target, "get_anchor_batch"):
+            monkeypatch.setattr(target, "get_anchor_batch", stub_get_anchor_batch)
+        if hasattr(target, "verify_record_inclusion"):
+            monkeypatch.setattr(
+                target, "verify_record_inclusion", stub_verify_record_inclusion
+            )
+        if hasattr(target, "list_anchor_batches"):
+            monkeypatch.setattr(target, "list_anchor_batches", stub_list_anchor_batches)
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]

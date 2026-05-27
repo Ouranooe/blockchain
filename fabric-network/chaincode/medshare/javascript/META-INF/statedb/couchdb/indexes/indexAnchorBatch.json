@@ -1,0 +1,8 @@
+{
+  "index": {
+    "fields": ["docType", "createdAt"]
+  },
+  "ddoc": "indexAnchorBatchDoc",
+  "name": "indexAnchorBatch",
+  "type": "json"
+}

@@ -1,6 +1,7 @@
 "use strict";
 
 const { Contract } = require("fabric-contract-api");
+const crypto = require("crypto");
 
 // 状态机（迭代 5 收紧）
 //                 REVOKED (patient 撤销)
@@ -585,6 +586,145 @@ class MedShareContract extends Contract {
       pageSize,
       bookmark,
       ["_design/indexPatientPendingDoc", "indexPatientPending"]
+    );
+    return JSON.stringify(out);
+  }
+
+  // ---------------- 迭代 9：Merkle 批量锚定 + 链上包含证明 ----------------
+
+  _batchKey(batchId) {
+    return `BATCH_${batchId}`;
+  }
+
+  _sha256Hex(buf) {
+    return crypto.createHash("sha256").update(buf).digest("hex");
+  }
+
+  _hashPair(leftHex, rightHex) {
+    // 左右拼接的二进制，再做一次 SHA-256（标准 Merkle）
+    return this._sha256Hex(Buffer.concat([
+      Buffer.from(String(leftHex), "hex"),
+      Buffer.from(String(rightHex), "hex"),
+    ]));
+  }
+
+  /**
+   * 迭代 9：把一批叶子哈希聚合上链。
+   * - 链码自己不重算根（叶子总集合不入链），调用方提交 (merkleRoot, leafCount)；
+   *   链上只承诺"这个根在这个 batchId 下被锚定"
+   * - 验证包含证明时不需要原始叶子集合，只需 (batchId, leafHash, proof) 即可重算根并比对
+   *
+   * 之所以"链下算根"：避免上链交易体积膨胀（链上交易只放 root，不放 N 个叶子）。
+   * 这是经典 Merkle 锚定（Bitcoin/Ethereum 同思路）。
+   */
+  async AnchorRecordBatch(ctx, batchId, merkleRoot, leafCount, createdAt) {
+    if (!batchId) throw new Error("batchId 必填");
+    if (!merkleRoot || !/^[0-9a-f]{64}$/i.test(String(merkleRoot))) {
+      throw new Error("merkleRoot 必须为 64 位十六进制（SHA-256）");
+    }
+    const count = Number(leafCount);
+    if (!Number.isFinite(count) || count <= 0) {
+      throw new Error("leafCount 必须为正整数");
+    }
+    const key = this._batchKey(batchId);
+    const existing = await this._getStateAsObject(ctx, key);
+    if (existing) {
+      throw new Error(`Batch ${batchId} already anchored`);
+    }
+    const batch = {
+      docType: "MerkleAnchorBatch",
+      batchId: String(batchId),
+      merkleRoot: String(merkleRoot).toLowerCase(),
+      leafCount: count,
+      createdAt: String(createdAt || ""),
+      txId: ctx.stub.getTxID(),
+      anchoredAt: this._isoFromSeconds(this._txTimestampSeconds(ctx)),
+    };
+    await this._putStateAsObject(ctx, key, batch);
+    ctx.stub.setEvent(
+      "BatchAnchored",
+      Buffer.from(JSON.stringify({
+        batchId: batch.batchId,
+        merkleRoot: batch.merkleRoot,
+        leafCount: batch.leafCount,
+        txId: batch.txId,
+      }))
+    );
+    return JSON.stringify(batch);
+  }
+
+  async GetAnchorBatch(ctx, batchId) {
+    const batch = await this._getStateAsObject(ctx, this._batchKey(batchId));
+    if (!batch) throw new Error(`Batch ${batchId} not found`);
+    return JSON.stringify(batch);
+  }
+
+  /**
+   * 迭代 9：在链上验证 (leafHash, proof) 是否能重算出 batch.merkleRoot。
+   *
+   * proofJson 形态：
+   *   [{ "hash": "<hex>", "position": "left" | "right" }, ...]
+   * 表示当前哈希在每一层中应与兄弟节点做什么样的拼接：
+   *   position="right" → next = sha256(curr || sibling)
+   *   position="left"  → next = sha256(sibling || curr)
+   */
+  async VerifyRecordInclusion(ctx, batchId, leafHash, proofJson) {
+    const batch = await this._getStateAsObject(ctx, this._batchKey(batchId));
+    if (!batch) throw new Error(`Batch ${batchId} not found`);
+    if (!leafHash || !/^[0-9a-f]{64}$/i.test(String(leafHash))) {
+      throw new Error("leafHash 必须为 64 位十六进制");
+    }
+    let proof;
+    try {
+      proof = JSON.parse(proofJson || "[]");
+    } catch (_e) {
+      throw new Error("proofJson 解析失败");
+    }
+    if (!Array.isArray(proof)) {
+      throw new Error("proofJson 必须为数组");
+    }
+    let current = String(leafHash).toLowerCase();
+    for (const step of proof) {
+      if (!step || typeof step !== "object") {
+        throw new Error("proof step 必须为 {hash,position} 对象");
+      }
+      const siblingHex = String(step.hash || "").toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(siblingHex)) {
+        throw new Error("proof.hash 必须为 64 位十六进制");
+      }
+      if (step.position === "right") {
+        // 兄弟在右
+        current = this._hashPair(current, siblingHex);
+      } else if (step.position === "left") {
+        // 兄弟在左
+        current = this._hashPair(siblingHex, current);
+      } else {
+        throw new Error("proof.position 必须为 'left' 或 'right'");
+      }
+    }
+    const ok = current === String(batch.merkleRoot).toLowerCase();
+    return JSON.stringify({
+      ok,
+      recomputedRoot: current,
+      anchoredRoot: batch.merkleRoot,
+      batchId: batch.batchId,
+      leafCount: batch.leafCount,
+      txId: batch.txId,
+    });
+  }
+
+  /**
+   * 迭代 9：列出所有锚定批次（CouchDB 富查询）。
+   */
+  async ListAnchorBatches(ctx, pageSize, bookmark) {
+    const selector = { docType: "MerkleAnchorBatch" };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexAnchorBatchDoc", "indexAnchorBatch"],
+      [{ createdAt: "desc" }]
     );
     return JSON.stringify(out);
   }
