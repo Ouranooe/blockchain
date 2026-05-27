@@ -76,13 +76,28 @@
 - `/api/system/info` 返回 schemaVersion=v2
 
 ## 四、量化指标
-（实施后填入）
+
+| 指标 | 数值 |
+|------|------|
+| 链码 mocha 用例数 | 70 → **77**（+7） |
+| 后端 pytest 用例数 | 133 → **142**（+9） |
+| 老 record 兼容读成功率 | **100%**（`_normalizeRecord(obj)` 补齐 category=GENERAL） |
+| MigrateRecordsV2 幂等性 | 二次同样输入 count=0 |
+| 非 Org1MSP 调 Migrate | **100% 拒绝** |
 
 ## 五、反思
-（实施后填入）
+
+- 本迭代演示了 Fabric 链码 v2 升级的**最小可行方案**：
+  - 在链码内部保留单一 contract class（实操中往往用 `peer lifecycle chaincode upgrade` 让 channel 升级到新的 contract package）
+  - **加可选参数 + 默认值** 让旧调用方继续工作（向后兼容）
+  - **`_normalize*()`** 给老数据补默认（兼容读）
+  - **显式 Migrate 方法**（一次性把老数据写到新形态，留下 history 痕迹）
+- 字段白名单（`V2_RECORD_CATEGORIES`、`V2_REQUEST_PURPOSES`）让链码做最严格的 schema 校验；后端 pydantic pattern 双层防御。
+- 真正的 lifecycle 升级（`peer lifecycle chaincode package/install/approve/commit`）需要在真链上跑；本迭代用 `GetSchemaVersion()` 返回字符串 "v2" 作为一个简单的 schema 自描述接口。
+- 风险：CouchDB 索引 `indexCategory` 必须在升级时一起部署，否则按 category 富查询会回退到全表扫描。
 
 ## 六、Done Definition
 
-- [ ] 链码 mocha：累计 ≥ 73 条
-- [ ] 后端 pytest：累计 ≥ 131 条
-- [ ] commit message：`迭代 12：链码 v2 升级 + 状态迁移`
+- [x] 链码 mocha：70 + 7 = **77 条**全部通过
+- [x] 后端 pytest：133 + 9 = **142 条**全部通过
+- [x] commit message：`迭代 12：链码 v2 升级 + 状态迁移`

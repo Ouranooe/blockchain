@@ -53,6 +53,8 @@ class MedicalRecord(Base):
     freeze_tx_id = Column(String(128), nullable=True)
     unfreeze_tx_id = Column(String(128), nullable=True)
     unfreeze_gov_tx_id = Column(String(128), nullable=True)
+    # 迭代 12 v2：科室分类（缺省 GENERAL）
+    category = Column(String(32), nullable=False, default="GENERAL", index=True)
 
 
 class AuditEventRow(Base):
@@ -97,6 +99,8 @@ class AccessRequest(Base):
     max_reads = Column(Integer, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_tx_id = Column(String(128), nullable=True)
+    # 迭代 12 v2：申请目的（缺省 TREATMENT）
+    purpose = Column(String(32), nullable=False, default="TREATMENT", index=True)
 
 
 class GovernanceAction(Base):

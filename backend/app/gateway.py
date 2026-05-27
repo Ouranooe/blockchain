@@ -78,18 +78,19 @@ def create_record_evidence(
     patient_id: int,
     data_hash: str,
     created_at: str,
+    category: str = "",  # 迭代 12 v2 可选
 ) -> dict:
-    return _post(
-        "/records/evidence",
-        {
-            "org": _hospital_to_org(hospital_name),
-            "recordId": str(record_id),
-            "patientId": str(patient_id),
-            "uploaderHospital": hospital_name,
-            "dataHash": data_hash,
-            "createdAt": created_at,
-        },
-    )
+    payload = {
+        "org": _hospital_to_org(hospital_name),
+        "recordId": str(record_id),
+        "patientId": str(patient_id),
+        "uploaderHospital": hospital_name,
+        "dataHash": data_hash,
+        "createdAt": created_at,
+    }
+    if category:
+        payload["category"] = category
+    return _post("/records/evidence", payload)
 
 
 def create_access_request(
@@ -100,20 +101,21 @@ def create_access_request(
     patient_id: int,
     reason_hash: str,
     created_at: str,
+    purpose: str = "",  # 迭代 12 v2 可选
 ) -> dict:
-    return _post(
-        "/access-requests",
-        {
-            "org": _hospital_to_org(hospital_name),
-            "requestId": str(request_id),
-            "recordId": str(record_id),
-            "applicantHospital": hospital_name,
-            "patientId": str(patient_id),
-            "reasonHash": reason_hash,
-            "status": "PENDING",
-            "createdAt": created_at,
-        },
-    )
+    payload = {
+        "org": _hospital_to_org(hospital_name),
+        "requestId": str(request_id),
+        "recordId": str(record_id),
+        "applicantHospital": hospital_name,
+        "patientId": str(patient_id),
+        "reasonHash": reason_hash,
+        "status": "PENDING",
+        "createdAt": created_at,
+    }
+    if purpose:
+        payload["purpose"] = purpose
+    return _post("/access-requests", payload)
 
 
 def approve_access_request(
@@ -442,3 +444,38 @@ def unfreeze_record(
             "unfrozenAt": unfrozen_at,
         },
     )
+
+
+# ---------- 迭代 12：链码 v2 升级 ----------
+
+def get_schema_version(*, org: str = "org1") -> dict:
+    from urllib.parse import urlencode
+
+    return _get(f"/system/schema-version?{urlencode({'org': org})}")
+
+
+def migrate_records_v2(*, items: list, org: str = "org1") -> dict:
+    import json as _json
+
+    return _post(
+        "/admin/migrate/records-v2",
+        {"org": org, "items": items, "batchJson": _json.dumps(items)},
+    )
+
+
+def query_records_by_category(
+    *,
+    category: str,
+    page_size: int = 20,
+    bookmark: str = "",
+    org: str = "org1",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "org": org,
+        "category": category,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/records/query/by-category?{urlencode(params)}")

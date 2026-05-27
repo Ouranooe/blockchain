@@ -144,6 +144,8 @@ def client(db_engine, db_session, monkeypatch):
             "createdAt": kwargs["created_at"],
             "updatedAt": kwargs["created_at"],
             "txId": tx,
+            # 迭代 12 v2：category
+            "category": kwargs.get("category") or "GENERAL",
         }
         chain_store["records"][rid] = [snap]
         _bust_record(rid)
@@ -258,6 +260,8 @@ def client(db_engine, db_session, monkeypatch):
             kwargs["patient_id"],
             tx,
         )
+        # 迭代 12 v2：purpose
+        snap["purpose"] = kwargs.get("purpose") or "TREATMENT"
         chain_store["requests"][rid] = [snap]
         _bust_request(rid)
         return {"txId": tx, "result": snap}
@@ -660,6 +664,44 @@ def client(db_engine, db_session, monkeypatch):
         _bust_record(rid)
         return {"txId": tx, "result": snap}
 
+    # 迭代 12 v2 stubs
+    def stub_get_schema_version(*, org="org1"):
+        return {"result": "v2"}
+
+    def stub_migrate_records_v2(**kwargs):
+        items = kwargs.get("items") or []
+        migrated = []
+        for item in items:
+            rid = int(item["recordId"])
+            entries = chain_store["records"].get(rid)
+            if not entries:
+                raise RuntimeError(f"Record evidence {rid} not found")
+            latest = entries[-1]
+            cat = str(item.get("category", "GENERAL"))
+            if latest.get("category") == cat:
+                continue  # 幂等
+            latest["category"] = cat
+            latest["_migratedAt"] = "2026-05-27T00:00:00Z"
+            migrated.append(str(rid))
+        return {
+            "txId": f"migrate-{len(migrated)}",
+            "result": {"migrated": migrated, "count": len(migrated)},
+        }
+
+    def stub_query_records_by_category(**kwargs):
+        cat = kwargs["category"]
+        latest = []
+        for rid, snapshots in sorted(chain_store["records"].items()):
+            if not snapshots:
+                continue
+            snap = snapshots[-1]
+            if (snap.get("category") or "GENERAL") == cat:
+                latest.append({**snap, "isLatest": True})
+        out = _rich_paginate(
+            latest, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
     def stub_unfreeze_record(**kwargs):
         rid = int(kwargs["record_id"])
         entries = chain_store["records"].get(rid)
@@ -774,6 +816,14 @@ def client(db_engine, db_session, monkeypatch):
             monkeypatch.setattr(target, "freeze_record", stub_freeze_record)
         if hasattr(target, "unfreeze_record"):
             monkeypatch.setattr(target, "unfreeze_record", stub_unfreeze_record)
+        if hasattr(target, "get_schema_version"):
+            monkeypatch.setattr(target, "get_schema_version", stub_get_schema_version)
+        if hasattr(target, "migrate_records_v2"):
+            monkeypatch.setattr(target, "migrate_records_v2", stub_migrate_records_v2)
+        if hasattr(target, "query_records_by_category"):
+            monkeypatch.setattr(
+                target, "query_records_by_category", stub_query_records_by_category
+            )
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]

@@ -47,6 +47,10 @@ class MedicalRecordCreate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     diagnosis: str = Field(min_length=1, max_length=255)
     content: str = Field(min_length=1)
+    # 迭代 12 v2：可选科室分类
+    category: Optional[str] = Field(
+        default=None, pattern=r"^(GENERAL|INPATIENT|OUTPATIENT|EMERGENCY)$"
+    )
 
 
 class MedicalRecordRevise(BaseModel):
@@ -81,6 +85,8 @@ class MedicalRecordItem(BaseModel):
     frozen_at: Optional[datetime] = None
     freeze_tx_id: Optional[str] = None
     unfreeze_tx_id: Optional[str] = None
+    # 迭代 12 v2：科室分类
+    category: str = "GENERAL"
 
 
 class FileVerifyResult(BaseModel):
@@ -137,6 +143,10 @@ class AccessRequestChainHistory(BaseModel):
 class AccessRequestCreate(BaseModel):
     record_id: int
     reason: str = Field(min_length=1)
+    # 迭代 12 v2：可选申请目的
+    purpose: Optional[str] = Field(
+        default=None, pattern=r"^(TREATMENT|RESEARCH|AUDIT)$"
+    )
 
 
 class AccessRequestReview(BaseModel):
@@ -164,6 +174,8 @@ class AccessRequestItem(BaseModel):
     max_reads: Optional[int] = None
     revoked_at: Optional[datetime] = None
     revoke_tx_id: Optional[str] = None
+    # 迭代 12 v2：申请目的
+    purpose: str = "TREATMENT"
 
 
 class AccessConsumeResult(BaseModel):
@@ -281,6 +293,28 @@ class GovernanceApprover(BaseModel):
     msp: str
     approved_at: Optional[str] = None
     tx_id: Optional[str] = None
+
+
+# ---------------- 迭代 12：链码 v2 升级 ----------------
+
+
+class MigrationItem(BaseModel):
+    record_id: int
+    category: str = Field(pattern=r"^(GENERAL|INPATIENT|OUTPATIENT|EMERGENCY)$")
+
+
+class MigrationRequest(BaseModel):
+    items: list[MigrationItem]
+
+
+class MigrationResponse(BaseModel):
+    migrated: list[str] = Field(default_factory=list)
+    count: int = 0
+
+
+class SystemInfo(BaseModel):
+    schema_version: str
+    contract_kinds: dict = Field(default_factory=dict)
 
 
 class GovernanceActionInfo(BaseModel):

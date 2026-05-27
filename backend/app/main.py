@@ -36,9 +36,12 @@ from .gateway import (
     freeze_record,
     get_anchor_batch,
     get_governance_action,
+    get_schema_version,
     list_anchor_batches,
     list_governance_actions,
+    migrate_records_v2,
     propose_governance_action,
+    query_records_by_category,
     unfreeze_record,
     query_access_request,
     query_access_request_history,
@@ -87,12 +90,15 @@ from .schemas import (
     MedicalRecordItem,
     MedicalRecordRevise,
     MerkleProofStep,
+    MigrationRequest,
+    MigrationResponse,
     RecordChainHistory,
     RecordHistory,
     RecordInclusionProof,
     RecordVersionItem,
     RegisterRequest,
     SimpleMessage,
+    SystemInfo,
     UserInfo,
 )
 from .security import hash_password, is_hashed, verify_password
@@ -193,6 +199,7 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
         frozen_at=record.frozen_at,
         freeze_tx_id=record.freeze_tx_id,
         unfreeze_tx_id=record.unfreeze_tx_id,
+        category=record.category or "GENERAL",
     )
 
 
@@ -234,6 +241,7 @@ def _request_to_item(req: AccessRequest, users: Dict[int, User], records: Dict[i
         max_reads=req.max_reads,
         revoked_at=req.revoked_at,
         revoke_tx_id=req.revoke_tx_id,
+        purpose=req.purpose or "TREATMENT",
     )
 
 
@@ -459,6 +467,7 @@ def create_record(
         raise HTTPException(status_code=400, detail="patient_id 无效")
 
     content_hash = hashlib.sha256(payload.content.encode("utf-8")).hexdigest()
+    category = payload.category or "GENERAL"
     record = MedicalRecord(
         patient_id=payload.patient_id,
         uploader_hospital_id=current_user.id,
@@ -468,6 +477,7 @@ def create_record(
         content_hash=content_hash,
         version=1,
         previous_tx_id=None,
+        category=category,
     )
     db.add(record)
     db.flush()
@@ -480,6 +490,7 @@ def create_record(
             patient_id=record.patient_id,
             data_hash=content_hash,
             created_at=now_iso,
+            category=category,
         )
         record.tx_id = chain_result.get("txId")
     except RuntimeError as exc:
@@ -530,6 +541,7 @@ def submit_access_request(
         raise HTTPException(status_code=400, detail="该记录已有待审批申请")
 
     reason_hash = hashlib.sha256(payload.reason.encode("utf-8")).hexdigest()
+    purpose = payload.purpose or "TREATMENT"
     access_request = AccessRequest(
         record_id=payload.record_id,
         applicant_hospital_id=current_user.id,
@@ -537,6 +549,7 @@ def submit_access_request(
         reason=payload.reason,
         reason_hash=reason_hash,
         status="PENDING",
+        purpose=purpose,
     )
     db.add(access_request)
     db.flush()
@@ -550,6 +563,7 @@ def submit_access_request(
             patient_id=record.patient_id,
             reason_hash=reason_hash,
             created_at=now_iso,
+            purpose=purpose,
         )
         access_request.create_tx_id = chain_result.get("txId")
     except RuntimeError as exc:
@@ -1941,3 +1955,96 @@ def unfreeze_record_api(
     )
     users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
     return _record_to_item(record, users, True)
+
+
+# ---------------- 迭代 12：链码 v2 升级 + 状态迁移 ----------------
+
+
+@app.get(f"{settings.API_PREFIX}/system/info", response_model=SystemInfo)
+def system_info(
+    _current_user: User = Depends(get_current_user),
+):
+    """迭代 12：返回链码 schema 版本号 + 可用字段枚举。"""
+    try:
+        chain_result = get_schema_version()
+        result = chain_result.get("result")
+        schema_version = str(result) if isinstance(result, str) else "v2"
+    except RuntimeError:
+        schema_version = "v2"
+    return SystemInfo(
+        schema_version=schema_version,
+        contract_kinds={
+            "record_categories": ["GENERAL", "INPATIENT", "OUTPATIENT", "EMERGENCY"],
+            "request_purposes": ["TREATMENT", "RESEARCH", "AUDIT"],
+        },
+    )
+
+
+@app.post(
+    f"{settings.API_PREFIX}/admin/migrate/records-v2",
+    response_model=MigrationResponse,
+)
+def migrate_records_v2_api(
+    payload: MigrationRequest,
+    _current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 12：把指定 records 的 category 一次性迁移到 v2。
+    后端层先在 DB 写入（保持镜像同步），然后批量提交给链码。"""
+    items = []
+    db_targets = []
+    for item in payload.items:
+        record = (
+            db.query(MedicalRecord)
+            .filter(MedicalRecord.id == item.record_id)
+            .first()
+        )
+        if not record:
+            raise HTTPException(
+                status_code=404, detail=f"记录 {item.record_id} 不存在"
+            )
+        db_targets.append((record, item.category))
+        items.append({"recordId": str(item.record_id), "category": item.category})
+
+    try:
+        chain_result = migrate_records_v2(items=items, org="org1")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # 链上成功后同步 DB
+    for record, category in db_targets:
+        record.category = category
+    db.commit()
+
+    result = chain_result.get("result") if isinstance(chain_result, dict) else None
+    if not isinstance(result, dict):
+        result = {
+            "migrated": [str(it["recordId"]) for it in items],
+            "count": len(items),
+        }
+    return MigrationResponse(
+        migrated=[str(x) for x in (result.get("migrated") or [])],
+        count=int(result.get("count", 0) or 0),
+    )
+
+
+@app.get(
+    f"{settings.API_PREFIX}/records/chain/by-category",
+    response_model=ChainRecordPage,
+)
+def chain_records_by_category(
+    category: str = Query(
+        ..., pattern=r"^(GENERAL|INPATIENT|OUTPATIENT|EMERGENCY)$"
+    ),
+    page_size: int = Query(20, ge=1, le=200),
+    bookmark: str = "",
+    _current_user: User = Depends(get_current_user),
+):
+    """迭代 12：按 category 链上富查询最新版病历。"""
+    try:
+        payload = query_records_by_category(
+            category=category, page_size=page_size, bookmark=bookmark
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return _chain_page_records(payload)

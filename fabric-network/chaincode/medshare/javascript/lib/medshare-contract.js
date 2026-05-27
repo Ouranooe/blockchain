@@ -154,12 +154,17 @@ class MedShareContract extends Contract {
     patientId,
     uploaderHospital,
     dataHash,
-    createdAt
+    createdAt,
+    category // 迭代 12 v2 新增可选参数；缺省 GENERAL
   ) {
     const latestKey = this._latestKey(recordId);
     const existing = await this._getStateAsObject(ctx, latestKey);
     if (existing) {
       throw new Error(`Record evidence ${recordId} already exists`);
+    }
+    const cat = category ? String(category) : "GENERAL";
+    if (!MedShareContract.V2_RECORD_CATEGORIES.has(cat)) {
+      throw new Error(`未知 category: ${cat}`);
     }
 
     const evidence = {
@@ -172,6 +177,7 @@ class MedShareContract extends Contract {
       previousTxId: "",
       createdAt,
       updatedAt: createdAt,
+      category: cat,
       txId: ctx.stub.getTxID(),
     };
 
@@ -247,7 +253,9 @@ class MedShareContract extends Contract {
   }
 
   async GetRecordLatest(ctx, recordId) {
-    const evidence = await this._getStateAsObject(ctx, this._latestKey(recordId));
+    const evidence = this._normalizeRecord(
+      await this._getStateAsObject(ctx, this._latestKey(recordId))
+    );
     if (!evidence) {
       throw new Error(`Record evidence ${recordId} not found`);
     }
@@ -255,9 +263,11 @@ class MedShareContract extends Contract {
   }
 
   async GetRecordVersion(ctx, recordId, version) {
-    const evidence = await this._getStateAsObject(
-      ctx,
-      this._versionKey(recordId, version)
+    const evidence = this._normalizeRecord(
+      await this._getStateAsObject(
+        ctx,
+        this._versionKey(recordId, version)
+      )
     );
     if (!evidence) {
       throw new Error(`Record ${recordId} version ${version} not found`);
@@ -275,12 +285,17 @@ class MedShareContract extends Contract {
     patientId,
     reasonHash,
     status,
-    createdAt
+    createdAt,
+    purpose // 迭代 12 v2 新增可选参数；缺省 TREATMENT
   ) {
     const key = this._requestKey(requestId);
     const existing = await this._getStateAsObject(ctx, key);
     if (existing) {
       throw new Error(`Access request ${requestId} already exists`);
+    }
+    const pur = purpose ? String(purpose) : "TREATMENT";
+    if (!MedShareContract.V2_REQUEST_PURPOSES.has(pur)) {
+      throw new Error(`未知 purpose: ${pur}`);
     }
 
     const request = {
@@ -291,6 +306,7 @@ class MedShareContract extends Contract {
       applicantMsp: this._callerMsp(ctx), // 迭代 5：绑定申请方的 MSP
       patientId,                          // 迭代 5：记录归属患者
       reasonHash,
+      purpose: pur,                       // 迭代 12 v2
       status: status || "PENDING",
       createdAt,
       reviewedAt: "",
@@ -939,8 +955,25 @@ class MedShareContract extends Contract {
     if (obj.freezeReasonHash === undefined) obj.freezeReasonHash = "";
     if (obj.unfreezeTxId === undefined) obj.unfreezeTxId = "";
     if (obj.unfreezeGovTxId === undefined) obj.unfreezeGovTxId = "";
+    // 迭代 12 v2：科室分类（兼容读，缺省 GENERAL）
+    if (obj.category === undefined) obj.category = "GENERAL";
     return obj;
   }
+
+  _normalizeRequest(obj) {
+    if (!obj) return obj;
+    // 迭代 12 v2：申请目的（兼容读，缺省 TREATMENT）
+    if (obj.purpose === undefined) obj.purpose = "TREATMENT";
+    return obj;
+  }
+
+  // 迭代 12：v2 字段白名单
+  static V2_RECORD_CATEGORIES = new Set([
+    "GENERAL", "INPATIENT", "OUTPATIENT", "EMERGENCY",
+  ]);
+  static V2_REQUEST_PURPOSES = new Set([
+    "TREATMENT", "RESEARCH", "AUDIT",
+  ]);
 
   /**
    * 迭代 11：患者紧急冻结自己的病历。冻结后所有写动作 / 读消费动作均拒绝。
@@ -1001,6 +1034,134 @@ class MedShareContract extends Contract {
    * 这是迭代 10 + 11 合约组合的核心：链码强制单方患者无法单独解冻，
    * 必须经过双 MSP 治理流程。
    */
+  // ---------------- 迭代 12：链码 v2 升级 + 状态迁移 ----------------
+
+  GetSchemaVersion() {
+    return "v2";
+  }
+
+  /**
+   * 迭代 12：把老 record 一次性迁移到 v2（写 category）。
+   *
+   * 仅 Org1MSP（管理员链上身份）可调用，避免医院随意改自己的 category。
+   * 入参 batchJson: `[{"recordId": "1", "category": "INPATIENT"}, ...]`
+   * 操作幂等：若 record 已有 category 且与传入相同则跳过；不同则覆盖并打 _migratedAt 痕迹。
+   */
+  async MigrateRecordsV2(ctx, batchJson) {
+    if (this._callerMsp(ctx) !== "Org1MSP") {
+      throw new Error("仅 Org1MSP 可执行链码迁移");
+    }
+    let items;
+    try {
+      items = JSON.parse(batchJson || "[]");
+    } catch (_e) {
+      throw new Error("batchJson 解析失败");
+    }
+    if (!Array.isArray(items)) {
+      throw new Error("batchJson 必须为数组");
+    }
+    const migrated = [];
+    for (const item of items) {
+      const rid = String(item.recordId || "");
+      const cat = String(item.category || "GENERAL");
+      if (!rid) throw new Error("recordId 必填");
+      if (!MedShareContract.V2_RECORD_CATEGORIES.has(cat)) {
+        throw new Error(`未知 category: ${cat}`);
+      }
+      const latestKey = this._latestKey(rid);
+      const latest = await this._getStateAsObject(ctx, latestKey);
+      if (!latest) {
+        throw new Error(`Record evidence ${rid} not found`);
+      }
+      if (latest.category === cat) {
+        continue; // 幂等：相同跳过
+      }
+      latest.category = cat;
+      latest._migratedAt = this._isoFromSeconds(this._txTimestampSeconds(ctx));
+      latest._migrateTxId = ctx.stub.getTxID();
+      await this._putStateAsObject(ctx, latestKey, { ...latest, isLatest: true });
+      migrated.push(rid);
+    }
+    ctx.stub.setEvent(
+      "SchemaMigrated",
+      Buffer.from(JSON.stringify({
+        kind: "RecordEvidence",
+        migrated,
+        count: migrated.length,
+      }))
+    );
+    return JSON.stringify({ migrated, count: migrated.length });
+  }
+
+  /**
+   * 迭代 12：把老 request 一次性迁移到 v2（写 purpose）。
+   */
+  async MigrateRequestsV2(ctx, batchJson) {
+    if (this._callerMsp(ctx) !== "Org1MSP") {
+      throw new Error("仅 Org1MSP 可执行链码迁移");
+    }
+    let items;
+    try {
+      items = JSON.parse(batchJson || "[]");
+    } catch (_e) {
+      throw new Error("batchJson 解析失败");
+    }
+    if (!Array.isArray(items)) {
+      throw new Error("batchJson 必须为数组");
+    }
+    const migrated = [];
+    for (const item of items) {
+      const reqId = String(item.requestId || "");
+      const pur = String(item.purpose || "TREATMENT");
+      if (!reqId) throw new Error("requestId 必填");
+      if (!MedShareContract.V2_REQUEST_PURPOSES.has(pur)) {
+        throw new Error(`未知 purpose: ${pur}`);
+      }
+      const key = this._requestKey(reqId);
+      const req = await this._getStateAsObject(ctx, key);
+      if (!req) {
+        throw new Error(`Access request ${reqId} not found`);
+      }
+      if (req.purpose === pur) continue;
+      req.purpose = pur;
+      req._migratedAt = this._isoFromSeconds(this._txTimestampSeconds(ctx));
+      req._migrateTxId = ctx.stub.getTxID();
+      await this._putStateAsObject(ctx, key, req);
+      migrated.push(reqId);
+    }
+    ctx.stub.setEvent(
+      "SchemaMigrated",
+      Buffer.from(JSON.stringify({
+        kind: "AccessRequest",
+        migrated,
+        count: migrated.length,
+      }))
+    );
+    return JSON.stringify({ migrated, count: migrated.length });
+  }
+
+  /**
+   * 迭代 12：按 category 查询最新版病历。
+   */
+  async QueryRecordsByCategory(ctx, category, pageSize, bookmark) {
+    if (!MedShareContract.V2_RECORD_CATEGORIES.has(String(category))) {
+      throw new Error(`未知 category: ${category}`);
+    }
+    const selector = {
+      docType: "RecordEvidence",
+      isLatest: true,
+      category: String(category),
+    };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexCategoryDoc", "indexCategory"]
+    );
+    return JSON.stringify(out);
+  }
+
   async UnfreezeRecord(ctx, recordId, governanceActionId, unfrozenAt) {
     const latestKey = this._latestKey(recordId);
     const latest = this._normalizeRecord(

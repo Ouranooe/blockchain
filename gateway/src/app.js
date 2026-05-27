@@ -260,18 +260,21 @@ app.get("/ready", async (_req, res) => {
 });
 
 app.post("/api/records/evidence", async (req, res) => {
-  const { org, recordId, patientId, uploaderHospital, dataHash, createdAt } = req.body;
+  const { org, recordId, patientId, uploaderHospital, dataHash, createdAt, category } = req.body;
   if (!recordId || !patientId || !uploaderHospital || !dataHash || !createdAt) {
     return res.status(400).json({ message: "missing required fields" });
   }
   try {
-    const result = await submit(org, "CreateMedicalRecordEvidence", [
+    // 迭代 12：category 为可选第 6 参数
+    const args = [
       String(recordId),
       String(patientId),
       String(uploaderHospital),
       String(dataHash),
-      String(createdAt)
-    ]);
+      String(createdAt),
+    ];
+    if (category) args.push(String(category));
+    const result = await submit(org, "CreateMedicalRecordEvidence", args);
     res.json(result);
   } catch (error) {
     sendGatewayError(res, error);
@@ -364,21 +367,24 @@ app.get("/api/records/evidence/:recordId/version/:version", async (req, res) => 
 });
 
 app.post("/api/access-requests", async (req, res) => {
-  const { org, requestId, recordId, applicantHospital, patientId, reasonHash, status, createdAt } = req.body;
+  const { org, requestId, recordId, applicantHospital, patientId, reasonHash, status, createdAt, purpose } = req.body;
   if (!requestId || !recordId || !applicantHospital || !patientId || !reasonHash || !createdAt) {
     return res.status(400).json({ message: "missing required fields" });
   }
   try {
     // 迭代 5：传入 patientId，链码记录 applicantMsp
-    const result = await submit(org, "CreateAccessRequest", [
+    // 迭代 12：purpose 为可选第 8 参数
+    const args = [
       String(requestId),
       String(recordId),
       String(applicantHospital),
       String(patientId),
       String(reasonHash),
       String(status || "PENDING"),
-      String(createdAt)
-    ]);
+      String(createdAt),
+    ];
+    if (purpose) args.push(String(purpose));
+    const result = await submit(org, "CreateAccessRequest", args);
     invalidateRequestCache(requestId);
     res.json(result);
   } catch (error) {
@@ -729,6 +735,49 @@ app.post("/api/records/evidence/:recordId/unfreeze", async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
+});
+
+// ---------- 迭代 12：链码 v2 ----------
+
+app.get("/api/system/schema-version", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    // GetSchemaVersion 是同步纯函数（无 ctx），evaluate 仍可调
+    const result = await evaluate(org, "GetSchemaVersion", []);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/admin/migrate/records-v2", async (req, res) => {
+  const { org, batchJson } = req.body || {};
+  if (!batchJson) {
+    return res.status(400).json({ message: "batchJson 必填" });
+  }
+  try {
+    const result = await submit(org, "MigrateRecordsV2", [String(batchJson)]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/records/query/by-category", async (req, res) => {
+  const org = req.query.org || "org1";
+  const category = String(req.query.category || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  if (!category) {
+    return res.status(400).json({ message: "category 必填" });
+  }
+  await _servePagedQuery(
+    org,
+    "QueryRecordsByCategory",
+    [category, pageSize, bookmark],
+    { category, pageSize, bookmark },
+    res
+  );
 });
 
 // ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------

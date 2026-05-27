@@ -1171,4 +1171,139 @@ describe("MedShareContract", () => {
       expect(final.version).to.equal(2);
     });
   });
+
+  // ---------------- 迭代 12：链码 v2 升级 + 状态迁移 ----------------
+  describe("链码 v2 升级（迭代 12）", () => {
+    it("GetSchemaVersion 返回 v2", () => {
+      expect(contract.GetSchemaVersion()).to.equal("v2");
+    });
+
+    it("v2 创建 record 时传入 category → 持久化", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z",
+        "EMERGENCY"
+      );
+      const got = JSON.parse(await contract.GetRecordLatest(ctx, "1"));
+      expect(got.category).to.equal("EMERGENCY");
+    });
+
+    it("缺省 category → GENERAL；未知 category → 抛错", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "2", "2", "HospitalA", "h", "t"
+      );
+      const got = JSON.parse(await contract.GetRecordLatest(ctx, "2"));
+      expect(got.category).to.equal("GENERAL");
+
+      await expect(
+        contract.CreateMedicalRecordEvidence(
+          ctx, "3", "2", "HospitalA", "h", "t", "DENTAL"
+        )
+      ).to.be.rejectedWith(/未知 category/);
+    });
+
+    it("兼容读：模拟一条老 record（无 category）→ GetRecordLatest 自动补 GENERAL", async () => {
+      // 直接绕过 Create 写入老 schema（无 category）
+      await ctx.stub.putState(
+        "RECORD_LATEST_99",
+        Buffer.from(JSON.stringify({
+          docType: "RecordEvidence",
+          recordId: "99",
+          patientId: "2",
+          uploaderHospital: "HospitalA",
+          dataHash: "hold",
+          version: 1,
+          previousTxId: "",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          txId: "old-tx",
+          isLatest: true,
+        }))
+      );
+      const got = JSON.parse(await contract.GetRecordLatest(ctx, "99"));
+      expect(got.category).to.equal("GENERAL");
+    });
+
+    it("MigrateRecordsV2：Org1MSP 一次性迁移；幂等；非 Org1MSP 拒绝", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "t"
+      );
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "2", "2", "HospitalA", "h", "t"
+      );
+
+      const r = JSON.parse(
+        await contract.MigrateRecordsV2(
+          ctx,
+          JSON.stringify([
+            { recordId: "1", category: "INPATIENT" },
+            { recordId: "2", category: "OUTPATIENT" },
+          ])
+        )
+      );
+      expect(r.count).to.equal(2);
+      const g1 = JSON.parse(await contract.GetRecordLatest(ctx, "1"));
+      expect(g1.category).to.equal("INPATIENT");
+      expect(g1._migratedAt).to.not.equal(undefined);
+
+      // 幂等：再次相同迁移 → 0
+      const r2 = JSON.parse(
+        await contract.MigrateRecordsV2(
+          ctx,
+          JSON.stringify([{ recordId: "1", category: "INPATIENT" }])
+        )
+      );
+      expect(r2.count).to.equal(0);
+
+      // 非 Org1MSP 拒
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await expect(
+        contract.MigrateRecordsV2(
+          ctx, JSON.stringify([{ recordId: "1", category: "INPATIENT" }])
+        )
+      ).to.be.rejectedWith(/仅 Org1MSP/);
+    });
+
+    it("QueryRecordsByCategory 按 category 过滤", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "t", "INPATIENT"
+      );
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "2", "2", "HospitalA", "h", "t", "OUTPATIENT"
+      );
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "3", "2", "HospitalA", "h", "t", "INPATIENT"
+      );
+
+      const out = JSON.parse(
+        await contract.QueryRecordsByCategory(ctx, "INPATIENT", "20", "")
+      );
+      expect(out.records).to.have.lengthOf(2);
+      expect(out.records.every((r) => r.category === "INPATIENT")).to.equal(true);
+    });
+
+    it("v2 创建 request 时传入 purpose → 持久化；缺省 TREATMENT", async () => {
+      await contract.CreateAccessRequest(
+        ctx, "100", "1", "HospitalB", "2", "rh",
+        "PENDING", "t", "RESEARCH"
+      );
+      const r = JSON.parse(await contract.QueryAccessRequest(ctx, "100"));
+      expect(r.purpose).to.equal("RESEARCH");
+
+      await contract.CreateAccessRequest(
+        ctx, "101", "1", "HospitalB", "2", "rh", "PENDING", "t"
+      );
+      const r2 = JSON.parse(await contract.QueryAccessRequest(ctx, "101"));
+      expect(r2.purpose).to.equal("TREATMENT");
+
+      await expect(
+        contract.CreateAccessRequest(
+          ctx, "102", "1", "HospitalB", "2", "rh", "PENDING", "t", "DENTAL"
+        )
+      ).to.be.rejectedWith(/未知 purpose/);
+    });
+  });
 });
