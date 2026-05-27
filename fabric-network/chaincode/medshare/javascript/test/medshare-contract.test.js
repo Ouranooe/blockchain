@@ -1012,4 +1012,163 @@ describe("MedShareContract", () => {
       expect(all.records).to.have.lengthOf(2);
     });
   });
+
+  // ---------------- 迭代 11：链上紧急冻结 + 治理解冻闭环 ----------------
+  describe("链上紧急冻结（迭代 11）", () => {
+    // 把 record 和 access request 准备好的 helper
+    async function setupApprovedRequest(opts = {}) {
+      const {
+        recordId = "1",
+        patientId = "2",
+        hospital = "HospitalA",
+        applicantHospital = "HospitalB",
+        applicantMsp = "Org2MSP",
+      } = opts;
+      // record 由 Org1 上传
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, recordId, patientId, hospital, "h0", "2026-05-27T00:00:00Z"
+      );
+      // request 由 Org2 申请
+      ctx.clientIdentity.getMSPID.returns(applicantMsp);
+      await contract.CreateAccessRequest(
+        ctx, "10", recordId, applicantHospital, patientId,
+        "rh", "PENDING", "t"
+      );
+      // 患者审批（链码不验证调用方）
+      await contract.ApproveAccessRequest(ctx, "10", "t", 7, 3);
+    }
+
+    it("患者可冻结自己的病历；冻结后 record.frozen=true", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      const raw = await contract.FreezeRecord(ctx, "1", "2", "reason-hash", "t");
+      const after = JSON.parse(raw);
+      expect(after.frozen).to.equal(true);
+      expect(after.freezeReasonHash).to.equal("reason-hash");
+      expect(after.freezeTxId).to.not.equal("");
+      const ev = ctx.stub._events.find((e) => e.name === "RecordFrozen");
+      expect(ev).to.not.equal(undefined);
+    });
+
+    it("非归属患者无法冻结", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      await expect(
+        contract.FreezeRecord(ctx, "1", "999", "rh", "t")
+      ).to.be.rejectedWith(/只有归属患者可以冻结/);
+    });
+
+    it("冻结后 UpdateMedicalRecordEvidence 被拒（关键守卫）", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      await contract.FreezeRecord(ctx, "1", "2", "rh", "t");
+      await expect(
+        contract.UpdateMedicalRecordEvidence(ctx, "1", "h2", "t2")
+      ).to.be.rejectedWith(/已被冻结，无法修订/);
+    });
+
+    it("冻结后 AccessRecord 被拒（关键守卫）", async () => {
+      await setupApprovedRequest();
+      // patient 冻结
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.FreezeRecord(ctx, "1", "2", "rh", "t");
+      // 医院 B 尝试消费授权
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await expect(
+        contract.AccessRecord(ctx, "10", "t-access")
+      ).to.be.rejectedWith(/已被冻结，链码层拒绝访问/);
+    });
+
+    it("无治理 actionId → 解冻失败；治理未 EXECUTED → 解冻失败", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      await contract.FreezeRecord(ctx, "1", "2", "rh", "t");
+
+      await expect(
+        contract.UnfreezeRecord(ctx, "1", "", "t")
+      ).to.be.rejectedWith(/必须传入治理动作 ID/);
+
+      // 只提案不批准
+      await contract.ProposeGovernanceAction(
+        ctx, "G-U1", "UNFREEZE_RECORD",
+        JSON.stringify({ recordId: "1" }), "t"
+      );
+      await expect(
+        contract.UnfreezeRecord(ctx, "1", "G-U1", "t")
+      ).to.be.rejectedWith(/必须为 EXECUTED/);
+    });
+
+    it("治理 kind 不匹配 / payload.recordId 不匹配 → 解冻失败", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      await contract.FreezeRecord(ctx, "1", "2", "rh", "t");
+
+      // kind=FREEZE_RECORD（错误 kind），即便 EXECUTED 也拒
+      await contract.ProposeGovernanceAction(
+        ctx, "G-WRONG", "FREEZE_RECORD",
+        JSON.stringify({ recordId: "1" }), "t"
+      );
+      await contract.ApproveGovernanceAction(ctx, "G-WRONG", "t");
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.ApproveGovernanceAction(ctx, "G-WRONG", "t");
+      await contract.ExecuteGovernanceAction(ctx, "G-WRONG", "t");
+      await expect(
+        contract.UnfreezeRecord(ctx, "1", "G-WRONG", "t")
+      ).to.be.rejectedWith(/kind=FREEZE_RECORD/);
+
+      // 正确 kind 但 recordId 不一致
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ProposeGovernanceAction(
+        ctx, "G-MISS", "UNFREEZE_RECORD",
+        JSON.stringify({ recordId: "999" }), "t"
+      );
+      await contract.ApproveGovernanceAction(ctx, "G-MISS", "t");
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.ApproveGovernanceAction(ctx, "G-MISS", "t");
+      await contract.ExecuteGovernanceAction(ctx, "G-MISS", "t");
+      await expect(
+        contract.UnfreezeRecord(ctx, "1", "G-MISS", "t")
+      ).to.be.rejectedWith(/payload\.recordId=999/);
+    });
+
+    it("正确治理 EXECUTED → 解冻成功，后续写入恢复", async () => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "2026-05-27T00:00:00Z"
+      );
+      await contract.FreezeRecord(ctx, "1", "2", "rh", "t");
+
+      await contract.ProposeGovernanceAction(
+        ctx, "G-OK", "UNFREEZE_RECORD",
+        JSON.stringify({ recordId: "1" }), "t"
+      );
+      await contract.ApproveGovernanceAction(ctx, "G-OK", "t");
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.ApproveGovernanceAction(ctx, "G-OK", "t");
+      await contract.ExecuteGovernanceAction(ctx, "G-OK", "t-now");
+
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      const after = JSON.parse(
+        await contract.UnfreezeRecord(ctx, "1", "G-OK", "t")
+      );
+      expect(after.frozen).to.equal(false);
+      expect(after.unfreezeGovTxId).to.not.equal("");
+
+      // 恢复后可修订
+      await contract.UpdateMedicalRecordEvidence(ctx, "1", "h2", "t2");
+      const final = JSON.parse(await contract.GetRecordLatest(ctx, "1"));
+      expect(final.version).to.equal(2);
+    });
+  });
 });

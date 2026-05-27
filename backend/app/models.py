@@ -47,6 +47,12 @@ class MedicalRecord(Base):
     # 迭代 9：Merkle 批量锚定的批次归属（NULL 表示未锚定）
     anchor_batch_id = Column(String(64), nullable=True, index=True)
     anchor_leaf_index = Column(Integer, nullable=True)
+    # 迭代 11：紧急冻结状态镜像（链上为真相）
+    frozen = Column(Boolean, nullable=False, default=False, index=True)
+    frozen_at = Column(DateTime, nullable=True)
+    freeze_tx_id = Column(String(128), nullable=True)
+    unfreeze_tx_id = Column(String(128), nullable=True)
+    unfreeze_gov_tx_id = Column(String(128), nullable=True)
 
 
 class AuditEventRow(Base):

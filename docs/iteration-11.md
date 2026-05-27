@@ -76,13 +76,23 @@ RecordEvidence 新增字段：
 - 审计事件 `RecordFrozen` 落库 + WebSocket 推
 
 ## 四、量化指标
-（实施后填入）
+
+| 指标 | 数值 |
+|------|------|
+| 链码 mocha 用例数 | 63 → **70**（+7） |
+| 后端 pytest 用例数 | 126 → **133**（+7） |
+| 冻结后写动作拒绝率 | **100%**（UpdateMedicalRecordEvidence / AccessRecord 全部抛错） |
+| 解冻必须的链上前置 | **EXECUTED 治理动作 + kind 匹配 + recordId 匹配 三重校验** |
 
 ## 五、反思
-（实施后填入）
+
+- 本迭代和迭代 10 形成了 **真正的合约组合**：解冻这个动作不能由任何单一角色触发，必须先在链上完成多 MSP 治理（迭代 10）→ 执行的 TxID 作为"令牌"被迭代 11 的 `UnfreezeRecord` 校验。这种"以链上状态作为权限令牌"的模式是 Fabric 真实工程极其常见的设计。
+- `_normalizeRecord(obj)` 让迭代 1-10 写入的老 record（没有 frozen 字段）依然可读 —— 链码层做兼容读，零迁移成本。
+- 风险：本迭代 `AccessRecord` 添加了对 record 的额外 getState 调用（从 ≤3 升到 ≤4）。如果将来需要严格控制 gas/状态读取，可以把 frozen 标志冗余进 access request 的镜像里。当前实现取"代码可读优先"。
+- 前端尚未引入冻结按钮（计划文档已说明）；后续可以补一个简单的红色按钮。
 
 ## 六、Done Definition
 
-- [ ] 链码 mocha：累计 ≥ 67 条全部通过
-- [ ] 后端 pytest：累计 ≥ 125 条全部通过
-- [ ] commit message：`迭代 11：链上紧急冻结 + 治理解冻闭环`
+- [x] 链码 mocha：63 + 7 = **70 条**全部通过
+- [x] 后端 pytest：126 + 7 = **133 条**全部通过
+- [x] commit message：`迭代 11：链上紧急冻结 + 治理解冻闭环`

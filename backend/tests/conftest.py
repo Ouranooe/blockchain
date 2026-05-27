@@ -154,6 +154,9 @@ def client(db_engine, db_session, monkeypatch):
         if rid not in chain_store["records"]:
             raise RuntimeError(f"Record evidence {rid} not found")
         prev = chain_store["records"][rid][-1]
+        # 迭代 11：冻结守卫
+        if prev.get("frozen"):
+            raise RuntimeError(f"病历 {rid} 已被冻结，无法修订")
         new_version = prev["version"] + 1
         tx = f"rec-{rid}-v{new_version}"
         new_entry = {
@@ -632,6 +635,66 @@ def client(db_engine, db_session, monkeypatch):
         )
         return {"result": out, "cache": "miss"}
 
+    # 迭代 11：冻结 / 解冻 stubs（模拟链码守卫）
+    def stub_freeze_record(**kwargs):
+        rid = int(kwargs["record_id"])
+        entries = chain_store["records"].get(rid)
+        if not entries:
+            raise RuntimeError(f"Record evidence {rid} not found")
+        latest = entries[-1]
+        if str(latest.get("patientId")) != str(kwargs["patient_id"]):
+            raise RuntimeError("只有归属患者可以冻结该病历")
+        if latest.get("frozen"):
+            raise RuntimeError(f"病历 {rid} 已处于冻结状态")
+        tx = f"rec-{rid}-freeze"
+        snap = {
+            **latest,
+            "frozen": True,
+            "frozenAt": kwargs.get("frozen_at", ""),
+            "freezeTxId": tx,
+            "freezeReasonHash": kwargs.get("reason_hash", ""),
+            "unfreezeTxId": "",
+            "unfreezeGovTxId": "",
+        }
+        chain_store["records"][rid].append(snap)
+        _bust_record(rid)
+        return {"txId": tx, "result": snap}
+
+    def stub_unfreeze_record(**kwargs):
+        rid = int(kwargs["record_id"])
+        entries = chain_store["records"].get(rid)
+        if not entries:
+            raise RuntimeError(f"Record evidence {rid} not found")
+        latest = entries[-1]
+        if not latest.get("frozen"):
+            raise RuntimeError(f"病历 {rid} 未处于冻结状态")
+        gov_id = kwargs.get("governance_action_id", "")
+        if not gov_id:
+            raise RuntimeError("解冻必须传入治理动作 ID")
+        gov = chain_store["governance"].get(gov_id)
+        if not gov:
+            raise RuntimeError(f"治理动作 {gov_id} 不存在")
+        if gov["status"] != "EXECUTED":
+            raise RuntimeError(
+                f"治理动作 {gov_id} 状态 {gov['status']}，必须为 EXECUTED 才能用于解冻"
+            )
+        if gov["kind"] != "UNFREEZE_RECORD":
+            raise RuntimeError(f"治理动作 {gov_id} 的 kind={gov['kind']}，期望 UNFREEZE_RECORD")
+        if str(gov.get("payload", {}).get("recordId")) != str(rid):
+            raise RuntimeError(
+                f"治理动作 payload.recordId={gov['payload'].get('recordId')} 与目标病历 {rid} 不一致"
+            )
+        tx = f"rec-{rid}-unfreeze"
+        snap = {
+            **latest,
+            "frozen": False,
+            "unfreezeTxId": tx,
+            "unfreezeGovTxId": gov.get("executeTxId", ""),
+        }
+        chain_store["records"][rid].append(snap)
+        _bust_record(rid)
+        return {"txId": tx, "result": snap}
+
     for target in (gateway_module, main_module, files_module):
         if hasattr(target, "create_record_evidence"):
             monkeypatch.setattr(target, "create_record_evidence", stub_create_record)
@@ -707,6 +770,10 @@ def client(db_engine, db_session, monkeypatch):
             monkeypatch.setattr(
                 target, "list_governance_actions", stub_list_governance_actions
             )
+        if hasattr(target, "freeze_record"):
+            monkeypatch.setattr(target, "freeze_record", stub_freeze_record)
+        if hasattr(target, "unfreeze_record"):
+            monkeypatch.setattr(target, "unfreeze_record", stub_unfreeze_record)
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]

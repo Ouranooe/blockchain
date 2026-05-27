@@ -691,6 +691,46 @@ app.get("/api/governance/actions", async (req, res) => {
   );
 });
 
+// ---------- 迭代 11：链上紧急冻结 + 治理解冻闭环 ----------
+
+app.post("/api/records/evidence/:recordId/freeze", async (req, res) => {
+  const { org, patientId, reasonHash, frozenAt } = req.body || {};
+  if (!patientId) {
+    return res.status(400).json({ message: "patientId 必填" });
+  }
+  try {
+    const result = await submit(org, "FreezeRecord", [
+      String(req.params.recordId),
+      String(patientId),
+      String(reasonHash || ""),
+      String(frozenAt || new Date().toISOString()),
+    ]);
+    // 迭代 3：写操作后让 history 缓存失效
+    invalidateRecordCache(req.params.recordId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/records/evidence/:recordId/unfreeze", async (req, res) => {
+  const { org, governanceActionId, unfrozenAt } = req.body || {};
+  if (!governanceActionId) {
+    return res.status(400).json({ message: "governanceActionId 必填" });
+  }
+  try {
+    const result = await submit(org, "UnfreezeRecord", [
+      String(req.params.recordId),
+      String(governanceActionId),
+      String(unfrozenAt || new Date().toISOString()),
+    ]);
+    invalidateRecordCache(req.params.recordId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // ---------- 迭代 6：链码事件订阅（真实 Fabric 下启用） ----------
 //
 // 设计：

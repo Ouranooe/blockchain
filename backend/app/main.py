@@ -33,11 +33,13 @@ from .gateway import (
     create_access_request,
     create_record_evidence,
     execute_governance_action,
+    freeze_record,
     get_anchor_batch,
     get_governance_action,
     list_anchor_batches,
     list_governance_actions,
     propose_governance_action,
+    unfreeze_record,
     query_access_request,
     query_access_request_history,
     query_pending_requests_for_patient,
@@ -187,6 +189,10 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
         file_name=record.file_name,
         file_mime=record.file_mime,
         file_size=record.file_size,
+        frozen=bool(record.frozen),
+        frozen_at=record.frozen_at,
+        freeze_tx_id=record.freeze_tx_id,
+        unfreeze_tx_id=record.unfreeze_tx_id,
     )
 
 
@@ -1809,3 +1815,129 @@ def get_governance(
 ):
     row = _load_governance(db, action_id)
     return _gov_action_to_info(row)
+
+
+# ---------------- 迭代 11：链上紧急冻结 + 治理解冻闭环 ----------------
+
+
+@app.post(
+    f"{settings.API_PREFIX}/records/{{record_id}}/freeze",
+    response_model=MedicalRecordItem,
+)
+def freeze_record_api(
+    record_id: int,
+    current_user: User = Depends(require_role("patient")),
+    db: Session = Depends(get_db),
+):
+    """迭代 11：患者紧急冻结自己病历。链码层强校验 patientId。"""
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+    if record.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="仅归属患者可冻结")
+    if record.frozen:
+        raise HTTPException(status_code=409, detail="病历已处于冻结状态")
+
+    now = datetime.now(timezone.utc)
+    reason_hash = hashlib.sha256(
+        f"freeze-by-{current_user.id}-{now.isoformat()}".encode("utf-8")
+    ).hexdigest()
+    try:
+        chain_result = freeze_record(
+            record_id=record.id,
+            patient_id=current_user.id,
+            reason_hash=reason_hash,
+            frozen_at=now.isoformat(),
+            org="org1",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    record.frozen = True
+    record.frozen_at = now.replace(tzinfo=None)
+    record.freeze_tx_id = chain_result.get("txId")
+    db.commit()
+    db.refresh(record)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="RecordFrozen",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=record.uploader_hospital_id,
+            record_id=record.id,
+            tx_id=record.freeze_tx_id,
+            message=f"患者紧急冻结了病历 #{record.id}",
+        )
+    )
+    users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
+    return _record_to_item(record, users, True)
+
+
+@app.post(
+    f"{settings.API_PREFIX}/records/{{record_id}}/unfreeze",
+    response_model=MedicalRecordItem,
+)
+def unfreeze_record_api(
+    record_id: int,
+    governance_action_id: str = Query(..., alias="governance_action_id"),
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """迭代 11：admin 用一个 EXECUTED 状态的治理动作解冻病历。
+    链码层校验该动作 kind=UNFREEZE_RECORD 且 payload.recordId 一致。"""
+    record = db.query(MedicalRecord).filter(MedicalRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="病历记录不存在")
+    if not record.frozen:
+        raise HTTPException(status_code=409, detail="病历未处于冻结状态")
+
+    gov = (
+        db.query(GovernanceAction)
+        .filter(GovernanceAction.action_id == governance_action_id)
+        .first()
+    )
+    if not gov:
+        raise HTTPException(status_code=400, detail="治理动作不存在")
+    if gov.status != "EXECUTED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"治理动作状态 {gov.status}，必须 EXECUTED 才能解冻",
+        )
+    if gov.kind != "UNFREEZE_RECORD":
+        raise HTTPException(
+            status_code=400,
+            detail=f"治理动作 kind={gov.kind}，期望 UNFREEZE_RECORD",
+        )
+
+    now = datetime.now(timezone.utc)
+    try:
+        chain_result = unfreeze_record(
+            record_id=record.id,
+            governance_action_id=governance_action_id,
+            unfrozen_at=now.isoformat(),
+            org="org1",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    record.frozen = False
+    record.unfreeze_tx_id = chain_result.get("txId")
+    record.unfreeze_gov_tx_id = gov.execute_tx_id
+    db.commit()
+    db.refresh(record)
+
+    _safe_emit(
+        AuditPayload(
+            event_type="RecordUnfrozen",
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+            subject_user_id=record.patient_id,
+            record_id=record.id,
+            tx_id=record.unfreeze_tx_id,
+            message=f"治理解冻：病历 #{record.id} 已解冻（gov={governance_action_id}）",
+            payload={"governance_action_id": governance_action_id},
+        )
+    )
+    users = _user_map(db, [record.patient_id, record.uploader_hospital_id])
+    return _record_to_item(record, users, True)

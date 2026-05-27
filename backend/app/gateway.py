@@ -404,3 +404,41 @@ def list_governance_actions(
         "bookmark": bookmark or "",
     }
     return _get(f"/governance/actions?{urlencode(params)}")
+
+
+# ---------- 迭代 11：链上紧急冻结 + 治理解冻 ----------
+
+def freeze_record(
+    *,
+    record_id: int,
+    patient_id: int,
+    reason_hash: str,
+    frozen_at: str,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        f"/records/evidence/{record_id}/freeze",
+        {
+            "org": org,
+            "patientId": str(patient_id),
+            "reasonHash": reason_hash,
+            "frozenAt": frozen_at,
+        },
+    )
+
+
+def unfreeze_record(
+    *,
+    record_id: int,
+    governance_action_id: str,
+    unfrozen_at: str,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        f"/records/evidence/{record_id}/unfreeze",
+        {
+            "org": org,
+            "governanceActionId": governance_action_id,
+            "unfrozenAt": unfrozen_at,
+        },
+    )

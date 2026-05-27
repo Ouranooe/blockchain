@@ -200,6 +200,10 @@ class MedShareContract extends Contract {
     if (!latest) {
       throw new Error(`Record evidence ${recordId} not found`);
     }
+    // 迭代 11：冻结守卫
+    if (latest.frozen) {
+      throw new Error(`病历 ${recordId} 已被冻结，无法修订`);
+    }
 
     const newVersion = latest.version + 1;
     const newEvidence = {
@@ -434,6 +438,16 @@ class MedShareContract extends Contract {
     }
     if (!request.remainingReads || request.remainingReads <= 0) {
       throw new Error("访问次数已用尽");
+    }
+    // 迭代 11：冻结守卫 —— 即使授权依然有效，被冻结的病历也不可被消费
+    const latestRecord = await this._getStateAsObject(
+      ctx,
+      this._latestKey(request.recordId)
+    );
+    if (latestRecord && latestRecord.frozen) {
+      throw new Error(
+        `病历 ${request.recordId} 已被冻结，链码层拒绝访问`
+      );
     }
     const callerMsp = this._callerMsp(ctx);
     if (
@@ -912,6 +926,145 @@ class MedShareContract extends Contract {
       [{ proposedAt: "desc" }]
     );
     return JSON.stringify(out);
+  }
+
+  // ---------------- 迭代 11：链上紧急冻结 + 治理解冻闭环 ----------------
+
+  _normalizeRecord(obj) {
+    // 老 record 缺省字段降级处理（向后兼容迭代 1-10）
+    if (!obj) return obj;
+    if (obj.frozen === undefined) obj.frozen = false;
+    if (obj.frozenAt === undefined) obj.frozenAt = "";
+    if (obj.freezeTxId === undefined) obj.freezeTxId = "";
+    if (obj.freezeReasonHash === undefined) obj.freezeReasonHash = "";
+    if (obj.unfreezeTxId === undefined) obj.unfreezeTxId = "";
+    if (obj.unfreezeGovTxId === undefined) obj.unfreezeGovTxId = "";
+    return obj;
+  }
+
+  /**
+   * 迭代 11：患者紧急冻结自己的病历。冻结后所有写动作 / 读消费动作均拒绝。
+   * 校验：必须 record.patientId == patientId。
+   */
+  async FreezeRecord(ctx, recordId, patientId, reasonHash, frozenAt) {
+    const latestKey = this._latestKey(recordId);
+    const latest = this._normalizeRecord(
+      await this._getStateAsObject(ctx, latestKey)
+    );
+    if (!latest) {
+      throw new Error(`Record evidence ${recordId} not found`);
+    }
+    if (String(latest.patientId) !== String(patientId)) {
+      throw new Error("只有归属患者可以冻结该病历");
+    }
+    if (latest.frozen) {
+      throw new Error(`病历 ${recordId} 已处于冻结状态`);
+    }
+    latest.frozen = true;
+    latest.frozenAt = String(frozenAt || "");
+    latest.freezeTxId = ctx.stub.getTxID();
+    latest.freezeReasonHash = String(reasonHash || "");
+    // 解冻字段清零，便于下一次冻结
+    latest.unfreezeTxId = "";
+    latest.unfreezeGovTxId = "";
+
+    await this._putStateAsObject(ctx, latestKey, { ...latest, isLatest: true });
+    // 也在最新版本键上更新（保持两键一致）
+    const versionKey = this._versionKey(recordId, latest.version);
+    const versioned = this._normalizeRecord(
+      await this._getStateAsObject(ctx, versionKey)
+    );
+    if (versioned) {
+      versioned.frozen = true;
+      versioned.frozenAt = latest.frozenAt;
+      versioned.freezeTxId = latest.freezeTxId;
+      versioned.freezeReasonHash = latest.freezeReasonHash;
+      await this._putStateAsObject(ctx, versionKey, versioned);
+    }
+
+    ctx.stub.setEvent(
+      "RecordFrozen",
+      Buffer.from(JSON.stringify({
+        recordId: String(recordId),
+        patientId: String(patientId),
+        frozenAt: latest.frozenAt,
+        txId: latest.freezeTxId,
+      }))
+    );
+    return JSON.stringify(latest);
+  }
+
+  /**
+   * 迭代 11：解冻一条病历。
+   * 必须传入一个已 EXECUTED 的治理动作 ID，且该治理动作的
+   * kind == "UNFREEZE_RECORD" 且 payload.recordId == recordId。
+   * 这是迭代 10 + 11 合约组合的核心：链码强制单方患者无法单独解冻，
+   * 必须经过双 MSP 治理流程。
+   */
+  async UnfreezeRecord(ctx, recordId, governanceActionId, unfrozenAt) {
+    const latestKey = this._latestKey(recordId);
+    const latest = this._normalizeRecord(
+      await this._getStateAsObject(ctx, latestKey)
+    );
+    if (!latest) {
+      throw new Error(`Record evidence ${recordId} not found`);
+    }
+    if (!latest.frozen) {
+      throw new Error(`病历 ${recordId} 未处于冻结状态`);
+    }
+    if (!governanceActionId) {
+      throw new Error("解冻必须传入治理动作 ID");
+    }
+    const gov = await this._getStateAsObject(
+      ctx,
+      this._governanceKey(governanceActionId)
+    );
+    if (!gov) {
+      throw new Error(`治理动作 ${governanceActionId} 不存在`);
+    }
+    if (gov.status !== "EXECUTED") {
+      throw new Error(
+        `治理动作 ${governanceActionId} 状态 ${gov.status}，必须为 EXECUTED 才能用于解冻`
+      );
+    }
+    if (gov.kind !== "UNFREEZE_RECORD") {
+      throw new Error(
+        `治理动作 ${governanceActionId} 的 kind=${gov.kind}，期望 UNFREEZE_RECORD`
+      );
+    }
+    const govRecordId = (gov.payload || {}).recordId;
+    if (String(govRecordId) !== String(recordId)) {
+      throw new Error(
+        `治理动作 payload.recordId=${govRecordId} 与目标病历 ${recordId} 不一致`
+      );
+    }
+    latest.frozen = false;
+    latest.unfreezeTxId = ctx.stub.getTxID();
+    latest.unfreezeGovTxId = gov.executeTxId || "";
+    // frozenAt / freezeTxId / freezeReasonHash 留作历史痕迹（不清空）
+
+    await this._putStateAsObject(ctx, latestKey, { ...latest, isLatest: true });
+    const versionKey = this._versionKey(recordId, latest.version);
+    const versioned = this._normalizeRecord(
+      await this._getStateAsObject(ctx, versionKey)
+    );
+    if (versioned) {
+      versioned.frozen = false;
+      versioned.unfreezeTxId = latest.unfreezeTxId;
+      versioned.unfreezeGovTxId = latest.unfreezeGovTxId;
+      await this._putStateAsObject(ctx, versionKey, versioned);
+    }
+
+    ctx.stub.setEvent(
+      "RecordUnfrozen",
+      Buffer.from(JSON.stringify({
+        recordId: String(recordId),
+        governanceActionId: String(governanceActionId),
+        unfreezeGovTxId: latest.unfreezeGovTxId,
+        unfreezeTxId: latest.unfreezeTxId,
+      }))
+    );
+    return JSON.stringify(latest);
   }
 }
 

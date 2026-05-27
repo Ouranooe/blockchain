@@ -76,6 +76,11 @@ class MedicalRecordItem(BaseModel):
     file_name: Optional[str] = None
     file_mime: Optional[str] = None
     file_size: Optional[int] = None
+    # 迭代 11：链上紧急冻结
+    frozen: bool = False
+    frozen_at: Optional[datetime] = None
+    freeze_tx_id: Optional[str] = None
+    unfreeze_tx_id: Optional[str] = None
 
 
 class FileVerifyResult(BaseModel):
