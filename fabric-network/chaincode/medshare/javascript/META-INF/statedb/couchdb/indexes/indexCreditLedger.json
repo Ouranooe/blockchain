@@ -1,0 +1,8 @@
+{
+  "index": {
+    "fields": ["docType", "createdAt"]
+  },
+  "ddoc": "indexCreditLedgerDoc",
+  "name": "indexCreditLedger",
+  "type": "json"
+}

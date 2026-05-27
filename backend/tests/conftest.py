@@ -149,6 +149,8 @@ def client(db_engine, db_session, monkeypatch):
         }
         chain_store["records"][rid] = [snap]
         _bust_record(rid)
+        # 迭代 13：医院上传 → +5 分
+        _internal_mint(kwargs["hospital_name"], 5, "RECORD_UPLOAD")
         return {"txId": tx, "result": snap}
 
     def stub_revise_record(**kwargs):
@@ -298,6 +300,8 @@ def client(db_engine, db_session, monkeypatch):
         }
         chain_store["requests"][rid].append(snap)
         _bust_request(rid)
+        # 迭代 13：患者审批通过 → 患者 +1 分
+        _internal_mint(prev.get("patientId"), 1, "REQUEST_APPROVED")
         return {"txId": tx, "result": snap}
 
     def stub_reject_access_request(**kwargs):
@@ -371,6 +375,12 @@ def client(db_engine, db_session, monkeypatch):
         }
         chain_store["requests"][rid].append(snap)
         _bust_request(rid)
+        # 迭代 13：被访问 → 上传医院 +1 分
+        record_entries = chain_store["records"].get(int(prev["recordId"]))
+        if record_entries:
+            uploader = record_entries[-1].get("uploaderHospital")
+            if uploader:
+                _internal_mint(uploader, 1, "RECORD_ACCESSED")
         return {
             "txId": tx,
             "result": {
@@ -702,6 +712,85 @@ def client(db_engine, db_session, monkeypatch):
         )
         return {"result": out, "cache": "miss"}
 
+    # 迭代 13：积分 stubs（账户 + 流水）
+    chain_store["credits"] = {}    # user_id -> {balance, updatedAt}
+    chain_store["credit_ledger"] = []  # list[dict]
+
+    def _credit_account(uid):
+        uid = str(uid)
+        if uid not in chain_store["credits"]:
+            chain_store["credits"][uid] = {
+                "docType": "CreditAccount",
+                "userId": uid,
+                "balance": 0,
+                "updatedAt": "",
+            }
+        return chain_store["credits"][uid]
+
+    def _internal_mint(uid, amount, reason):
+        acc = _credit_account(uid)
+        acc["balance"] += int(amount)
+        entry = {
+            "docType": "CreditLedger",
+            "ledgerId": f"L{len(chain_store['credit_ledger']) + 1:04d}",
+            "fromUserId": "",
+            "toUserId": str(uid),
+            "amount": int(amount),
+            "reasonCode": reason,
+            "txId": f"mint-{uid}-{len(chain_store['credit_ledger']) + 1}",
+            "createdAt": "2026-05-27T00:00:00Z",
+        }
+        chain_store["credit_ledger"].append(entry)
+
+    def stub_credit_balance(user_id, *, org="org1"):
+        return {"result": _credit_account(user_id)}
+
+    def stub_credit_transfer(**kwargs):
+        from_id = str(kwargs["from_user_id"])
+        to_id = str(kwargs["to_user_id"])
+        amount = int(kwargs["amount"])
+        if from_id == to_id:
+            raise RuntimeError("不允许自转")
+        if amount <= 0:
+            raise RuntimeError("amount 必须为正数")
+        from_acc = _credit_account(from_id)
+        if from_acc["balance"] < amount:
+            raise RuntimeError(f"余额不足：{from_acc['balance']} < {amount}")
+        to_acc = _credit_account(to_id)
+        from_acc["balance"] -= amount
+        to_acc["balance"] += amount
+        entry = {
+            "docType": "CreditLedger",
+            "ledgerId": f"L{len(chain_store['credit_ledger']) + 1:04d}",
+            "fromUserId": from_id,
+            "toUserId": to_id,
+            "amount": amount,
+            "reasonCode": kwargs.get("reason_code", "TRANSFER"),
+            "txId": f"transfer-{from_id}-{to_id}",
+            "createdAt": "2026-05-27T00:00:00Z",
+        }
+        chain_store["credit_ledger"].append(entry)
+        return {
+            "txId": entry["txId"],
+            "result": {
+                "fromBalance": from_acc["balance"],
+                "toBalance": to_acc["balance"],
+                "ledger": entry,
+            },
+        }
+
+    def stub_credit_history(**kwargs):
+        uid = str(kwargs["user_id"])
+        matched = [
+            e for e in chain_store["credit_ledger"]
+            if e["fromUserId"] == uid or e["toUserId"] == uid
+        ]
+        matched.sort(key=lambda e: e["createdAt"], reverse=True)
+        out = _rich_paginate(
+            matched, kwargs.get("page_size", 20), kwargs.get("bookmark", "")
+        )
+        return {"result": out, "cache": "miss"}
+
     def stub_unfreeze_record(**kwargs):
         rid = int(kwargs["record_id"])
         entries = chain_store["records"].get(rid)
@@ -824,6 +913,12 @@ def client(db_engine, db_session, monkeypatch):
             monkeypatch.setattr(
                 target, "query_records_by_category", stub_query_records_by_category
             )
+        if hasattr(target, "credit_balance"):
+            monkeypatch.setattr(target, "credit_balance", stub_credit_balance)
+        if hasattr(target, "credit_transfer"):
+            monkeypatch.setattr(target, "credit_transfer", stub_credit_transfer)
+        if hasattr(target, "credit_history"):
+            monkeypatch.setattr(target, "credit_history", stub_credit_history)
 
     # 暴露 stats 与 store 供测试断言 / 篡改
     app.state.chain_stats = chain_store["stats"]

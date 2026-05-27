@@ -763,6 +763,72 @@ app.post("/api/admin/migrate/records-v2", async (req, res) => {
   }
 });
 
+// ---------- 迭代 13：积分（FT） ----------
+
+app.get("/api/credits/:userId/balance", async (req, res) => {
+  const org = req.query.org || "org1";
+  try {
+    const result = await evaluate(org, "CreditBalance", [String(req.params.userId)]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/credits/mint", async (req, res) => {
+  const { org, toUserId, amount, reasonCode, mintedAt } = req.body || {};
+  if (!toUserId || !amount) {
+    return res.status(400).json({ message: "toUserId / amount 必填" });
+  }
+  try {
+    const result = await submit(org, "CreditMint", [
+      String(toUserId),
+      String(amount),
+      String(reasonCode || ""),
+      String(mintedAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/credits/transfer", async (req, res) => {
+  const { org, fromUserId, toUserId, amount, reasonCode, txAt } = req.body || {};
+  if (!fromUserId || !toUserId || !amount) {
+    return res.status(400).json({ message: "fromUserId / toUserId / amount 必填" });
+  }
+  try {
+    const result = await submit(org, "CreditTransfer", [
+      String(fromUserId),
+      String(toUserId),
+      String(amount),
+      String(reasonCode || ""),
+      String(txAt || new Date().toISOString()),
+    ]);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/credits/history", async (req, res) => {
+  const org = req.query.org || "org1";
+  const userId = String(req.query.userId || "");
+  const pageSize = String(req.query.pageSize || "20");
+  const bookmark = String(req.query.bookmark || "");
+  if (!userId) {
+    return res.status(400).json({ message: "userId 必填" });
+  }
+  await _servePagedQuery(
+    org,
+    "CreditHistory",
+    [userId, pageSize, bookmark],
+    { userId, pageSize, bookmark },
+    res
+  );
+});
+
 app.get("/api/records/query/by-category", async (req, res) => {
   const org = req.query.org || "org1";
   const category = String(req.query.category || "");

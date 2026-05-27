@@ -479,3 +479,71 @@ def query_records_by_category(
         "bookmark": bookmark or "",
     }
     return _get(f"/records/query/by-category?{urlencode(params)}")
+
+
+# ---------- 迭代 13：积分（FT） ----------
+
+def credit_balance(user_id: str, *, org: str = "org1") -> dict:
+    from urllib.parse import urlencode
+
+    return _get(f"/credits/{user_id}/balance?{urlencode({'org': org})}")
+
+
+def credit_mint(
+    *,
+    to_user_id: str,
+    amount: int,
+    reason_code: str,
+    minted_at: str,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        "/credits/mint",
+        {
+            "org": org,
+            "toUserId": to_user_id,
+            "amount": int(amount),
+            "reasonCode": reason_code,
+            "mintedAt": minted_at,
+        },
+    )
+
+
+def credit_transfer(
+    *,
+    from_user_id: str,
+    to_user_id: str,
+    amount: int,
+    reason_code: str,
+    tx_at: str,
+    org: str = "org1",
+) -> dict:
+    return _post(
+        "/credits/transfer",
+        {
+            "org": org,
+            "fromUserId": from_user_id,
+            "toUserId": to_user_id,
+            "amount": int(amount),
+            "reasonCode": reason_code,
+            "txAt": tx_at,
+        },
+    )
+
+
+def credit_history(
+    *,
+    user_id: str,
+    page_size: int = 20,
+    bookmark: str = "",
+    org: str = "org1",
+) -> dict:
+    from urllib.parse import urlencode
+
+    params = {
+        "org": org,
+        "userId": user_id,
+        "pageSize": str(int(page_size)),
+        "bookmark": bookmark or "",
+    }
+    return _get(f"/credits/history?{urlencode(params)}")

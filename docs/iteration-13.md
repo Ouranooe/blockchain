@@ -73,13 +73,45 @@
 - 非 admin 直接调 mint → 403
 
 ## 四、量化指标
-（实施后填入）
+
+| 指标 | 数值 |
+|------|------|
+| 链码 mocha 用例数 | 77 → **85**（+8） |
+| 后端 pytest 用例数 | 142 → **149**（+7） |
+| 上传病历奖励准确度 | **100%**（每次上传 uploaderHospital 准确 +5） |
+| 余额不足转账拒绝率 | **100%**（链码层守卫） |
+| 自转拒绝率 | **100%**（链码 + 后端双层守卫） |
 
 ## 五、反思
-（实施后填入）
+
+- 选用 **uploaderHospital 字符串** 作为医院的积分账户 ID，**str(user.id)** 作为患者的账户 ID —— 这与链码内已有的字符串标识对齐，避免再引入一套用户 ID 映射。生产场景下可以统一为去中心化身份（DID）。
+- `_creditMint(ctx, ...)` 是链码内部辅助方法（不暴露为 contract function），让业务流程能在同一个交易里完成"业务动作 + 积分奖励"。这是 Fabric 单交易原子性的天然用法。
+- `CreditTransfer` 的双方 `putState` 在同一交易内完成 → Fabric endorsement 模型保证原子性：要么两边都改、要么都不改。这是经典 FT 实现。
+- 风险：当前积分账户没有"销毁"方法（如违规罚没）；如果运营需要可以再增加 `CreditBurn`（仅 Org1MSP）。本迭代故意保留最小可用范围。
+- CouchDB 流水索引 `indexCreditLedger` 按 createdAt 排序；如果需要按 fromUserId 范围查询，需要补一个 partial index。
 
 ## 六、Done Definition
 
-- [ ] 链码 mocha：累计 ≥ 80 条
-- [ ] 后端 pytest：累计 ≥ 138 条
-- [ ] commit message：`迭代 13：数据共享积分（FT）+ 经济激励闭环`
+- [x] 链码 mocha：77 + 8 = **85 条**全部通过
+- [x] 后端 pytest：142 + 7 = **149 条**全部通过
+- [x] commit message：`迭代 13：数据共享积分（FT）+ 经济激励闭环`
+
+---
+
+## 五次升级总结
+
+五次升级累计达成：
+
+| # | 主题 | 链码方法增量 | 后端测试增量 |
+|---|------|------------|------------|
+| 9 | Merkle 批量锚定 | +4 (Anchor/Get/Verify/List) | +10 |
+| 10 | 链上多签治理 | +6 (Propose/Approve/Reject/Execute/Get/List) | +9 |
+| 11 | 链上紧急冻结 + 治理解冻 | +2 (Freeze/Unfreeze) + 2 处守卫 | +7 |
+| 12 | 链码 v2 升级 + 状态迁移 | +4 (GetSchemaVersion / MigrateRecords / MigrateRequests / QueryByCategory) | +9 |
+| 13 | 数据共享积分（FT） | +4 (Mint/Transfer/Balance/History) + 3 处自动 mint | +7 |
+| 合计 | 5 次升级 | **+20 链码方法 / +6 守卫** | **+42 pytest 用例** |
+
+**链码 mocha**：49 → **85** （+36 用例）
+**后端 pytest**：107 → **149** （+42 用例）
+
+五次升级完整覆盖：**哈希聚合存证 / 链上多签治理 / 合约组合 / 链码生命周期升级 / 链上 FT 账本**。

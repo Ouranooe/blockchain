@@ -1306,4 +1306,102 @@ describe("MedShareContract", () => {
       ).to.be.rejectedWith(/未知 purpose/);
     });
   });
+
+  // ---------------- 迭代 13：数据共享积分（FT） ----------------
+  describe("数据共享积分（迭代 13）", () => {
+    beforeEach(() => {
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+    });
+
+    it("admin CreditMint 增加余额；非 Org1MSP 拒绝", async () => {
+      const got = JSON.parse(
+        await contract.CreditMint(ctx, "user-1", "10", "WELCOME", "t")
+      );
+      expect(got.balance).to.equal(10);
+
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await expect(
+        contract.CreditMint(ctx, "user-1", "1", "X", "t")
+      ).to.be.rejectedWith(/仅 Org1MSP/);
+    });
+
+    it("CreditBalance 不存在用户返回 0", async () => {
+      const got = JSON.parse(await contract.CreditBalance(ctx, "no-one"));
+      expect(got.balance).to.equal(0);
+    });
+
+    it("CreditTransfer 余额不足 → 抛错；双方余额不变（原子性）", async () => {
+      await contract.CreditMint(ctx, "alice", "5", "INIT", "t");
+      await expect(
+        contract.CreditTransfer(ctx, "alice", "bob", "100", "X", "t")
+      ).to.be.rejectedWith(/余额不足/);
+      const alice = JSON.parse(await contract.CreditBalance(ctx, "alice"));
+      const bob = JSON.parse(await contract.CreditBalance(ctx, "bob"));
+      expect(alice.balance).to.equal(5);
+      expect(bob.balance).to.equal(0);
+    });
+
+    it("CreditTransfer 自转抛错", async () => {
+      await contract.CreditMint(ctx, "alice", "5", "INIT", "t");
+      await expect(
+        contract.CreditTransfer(ctx, "alice", "alice", "1", "X", "t")
+      ).to.be.rejectedWith(/不允许自转/);
+    });
+
+    it("CreditTransfer 成功扣加双方余额", async () => {
+      await contract.CreditMint(ctx, "alice", "10", "INIT", "t");
+      ctx.stub.setTxID("transfer-tx-1");
+      const out = JSON.parse(
+        await contract.CreditTransfer(ctx, "alice", "bob", "3", "GIFT", "t")
+      );
+      expect(out.fromBalance).to.equal(7);
+      expect(out.toBalance).to.equal(3);
+      expect(out.ledger.amount).to.equal(3);
+      const ev = ctx.stub._events.find((e) => e.name === "CreditTransferred");
+      expect(ev).to.not.equal(undefined);
+    });
+
+    it("CreateMedicalRecordEvidence 自动给 uploaderHospital +5 分", async () => {
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "t"
+      );
+      const got = JSON.parse(await contract.CreditBalance(ctx, "HospitalA"));
+      expect(got.balance).to.equal(5);
+    });
+
+    it("AccessRecord 成功消费后 uploaderHospital +1 分", async () => {
+      // HospitalA 上传 → +5
+      await contract.CreateMedicalRecordEvidence(
+        ctx, "1", "2", "HospitalA", "h", "t"
+      );
+      // HospitalB 申请 → 患者 patient_2 审批 → 患者 +1
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.CreateAccessRequest(
+        ctx, "10", "1", "HospitalB", "2", "rh", "PENDING", "t"
+      );
+      ctx.clientIdentity.getMSPID.returns("Org1MSP");
+      await contract.ApproveAccessRequest(ctx, "10", "t", 7, 3);
+      const patientBal = JSON.parse(await contract.CreditBalance(ctx, "2"));
+      expect(patientBal.balance).to.equal(1);
+
+      // HospitalB 消费授权 → HospitalA +1
+      ctx.clientIdentity.getMSPID.returns("Org2MSP");
+      await contract.AccessRecord(ctx, "10", "t-now");
+      const hospABal = JSON.parse(await contract.CreditBalance(ctx, "HospitalA"));
+      expect(hospABal.balance).to.equal(6);
+    });
+
+    it("CreditHistory 富查询返回双向流水", async () => {
+      await contract.CreditMint(ctx, "alice", "10", "INIT", "t");
+      ctx.stub.setTxID("t1");
+      await contract.CreditTransfer(ctx, "alice", "bob", "3", "GIFT", "t");
+      ctx.stub.setTxID("t2");
+      await contract.CreditTransfer(ctx, "alice", "carol", "2", "GIFT", "t");
+      const hist = JSON.parse(
+        await contract.CreditHistory(ctx, "alice", "20", "")
+      );
+      // alice 应能看到至少 3 条：INIT mint + 2 transfer
+      expect(hist.records.length).to.be.at.least(3);
+    });
+  });
 });

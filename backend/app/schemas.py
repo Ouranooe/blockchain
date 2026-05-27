@@ -317,6 +317,36 @@ class SystemInfo(BaseModel):
     contract_kinds: dict = Field(default_factory=dict)
 
 
+# ---------------- 迭代 13：数据共享积分（FT） ----------------
+
+
+class CreditBalance(BaseModel):
+    user_id: str
+    balance: int = 0
+
+
+class CreditTransferRequest(BaseModel):
+    to_user_id: str = Field(min_length=1)
+    amount: int = Field(gt=0)
+    reason_code: str = Field(default="TRANSFER", max_length=64)
+
+
+class CreditLedgerItem(BaseModel):
+    ledger_id: str
+    from_user_id: str
+    to_user_id: str
+    amount: int
+    reason_code: str
+    tx_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CreditHistoryPage(BaseModel):
+    items: list[CreditLedgerItem] = Field(default_factory=list)
+    bookmark: str = ""
+    fetched_count: int = 0
+
+
 class GovernanceActionInfo(BaseModel):
     action_id: str
     kind: str

@@ -32,6 +32,9 @@ from .gateway import (
     check_gateway_ready,
     create_access_request,
     create_record_evidence,
+    credit_balance,
+    credit_history,
+    credit_transfer,
     execute_governance_action,
     freeze_record,
     get_anchor_batch,
@@ -79,6 +82,10 @@ from .schemas import (
     ChainRecordBrief,
     ChainRecordPage,
     ChangePasswordRequest,
+    CreditBalance as CreditBalanceSchema,
+    CreditHistoryPage,
+    CreditLedgerItem,
+    CreditTransferRequest,
     GovernanceActionInfo,
     GovernanceApprover,
     GovernanceProposeRequest,
@@ -2048,3 +2055,104 @@ def chain_records_by_category(
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return _chain_page_records(payload)
+
+
+# ---------------- 迭代 13：数据共享积分（FT） ----------------
+
+
+def _user_credit_id(user: User) -> str:
+    """链上 credit 账户 ID 约定：
+    - 医院：使用 hospital_name（e.g. "HospitalA"），与链码 uploaderHospital 对齐
+    - 患者 / admin：使用 str(user.id)，与链码 patientId 对齐
+    """
+    if user.role == "hospital" and user.hospital_name:
+        return user.hospital_name
+    return str(user.id)
+
+
+def _credit_balance_from_chain(chain_result: dict, fallback_id: str) -> CreditBalanceSchema:
+    result = chain_result.get("result") if isinstance(chain_result, dict) else None
+    if isinstance(result, dict):
+        return CreditBalanceSchema(
+            user_id=str(result.get("userId", fallback_id)),
+            balance=int(result.get("balance", 0) or 0),
+        )
+    return CreditBalanceSchema(user_id=fallback_id, balance=0)
+
+
+@app.get(f"{settings.API_PREFIX}/credits/balance", response_model=CreditBalanceSchema)
+def my_credit_balance(
+    current_user: User = Depends(get_current_user),
+):
+    uid = _user_credit_id(current_user)
+    try:
+        chain_result = credit_balance(uid)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return _credit_balance_from_chain(chain_result, uid)
+
+
+@app.post(f"{settings.API_PREFIX}/credits/transfer", response_model=CreditBalanceSchema)
+def transfer_credits(
+    payload: CreditTransferRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """迭代 13：任意角色互相转账。链码层校验余额 / 自转。"""
+    from_id = _user_credit_id(current_user)
+    if str(payload.to_user_id) == str(from_id):
+        raise HTTPException(status_code=400, detail="不允许自转")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        credit_transfer(
+            from_user_id=from_id,
+            to_user_id=str(payload.to_user_id),
+            amount=int(payload.amount),
+            reason_code=payload.reason_code or "TRANSFER",
+            tx_at=now_iso,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "余额不足" in msg or "不允许自转" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=502, detail=msg)
+
+    chain_result = credit_balance(from_id)
+    return _credit_balance_from_chain(chain_result, from_id)
+
+
+@app.get(f"{settings.API_PREFIX}/credits/history", response_model=CreditHistoryPage)
+def my_credit_history(
+    page_size: int = Query(20, ge=1, le=200),
+    bookmark: str = "",
+    current_user: User = Depends(get_current_user),
+):
+    uid = _user_credit_id(current_user)
+    try:
+        chain_result = credit_history(
+            user_id=uid, page_size=page_size, bookmark=bookmark
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    result = chain_result.get("result", {}) if isinstance(chain_result, dict) else {}
+    items_raw = result.get("records") or []
+    items = []
+    for r in items_raw:
+        if not isinstance(r, dict):
+            continue
+        items.append(
+            CreditLedgerItem(
+                ledger_id=str(r.get("ledgerId", "")),
+                from_user_id=str(r.get("fromUserId", "")),
+                to_user_id=str(r.get("toUserId", "")),
+                amount=int(r.get("amount", 0) or 0),
+                reason_code=str(r.get("reasonCode", "")),
+                tx_id=r.get("txId"),
+                created_at=r.get("createdAt"),
+            )
+        )
+    return CreditHistoryPage(
+        items=items,
+        bookmark=str(result.get("bookmark", "") or ""),
+        fetched_count=int(result.get("fetchedCount", len(items)) or len(items)),
+    )

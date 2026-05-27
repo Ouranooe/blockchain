@@ -197,6 +197,8 @@ class MedShareContract extends Contract {
         })
       )
     );
+    // 迭代 13：医院上传病历 → 自动 +5 分（uploaderHospital 作为账户 ID）
+    await this._creditMint(ctx, uploaderHospital, 5, "RECORD_UPLOAD");
     return JSON.stringify(evidence);
   }
 
@@ -373,6 +375,10 @@ class MedShareContract extends Contract {
         })
       )
     );
+    // 迭代 13：患者审批通过 → 患者 +1 分
+    if (request.patientId) {
+      await this._creditMint(ctx, request.patientId, 1, "REQUEST_APPROVED");
+    }
     return JSON.stringify(request);
   }
 
@@ -494,6 +500,15 @@ class MedShareContract extends Contract {
         })
       )
     );
+    // 迭代 13：被访问 → uploaderHospital +1 分（从 record 反查 uploader）
+    if (latestRecord && latestRecord.uploaderHospital) {
+      await this._creditMint(
+        ctx,
+        latestRecord.uploaderHospital,
+        1,
+        "RECORD_ACCESSED"
+      );
+    }
     return JSON.stringify({
       requestId,
       recordId: request.recordId,
@@ -1138,6 +1153,156 @@ class MedShareContract extends Contract {
       }))
     );
     return JSON.stringify({ migrated, count: migrated.length });
+  }
+
+  // ---------------- 迭代 13：数据共享积分（FT）+ 经济激励 ----------------
+
+  _creditKey(userId) {
+    return `CREDIT_${userId}`;
+  }
+
+  _creditLedgerKey(ledgerId) {
+    return `CREDIT_LEDGER_${ledgerId}`;
+  }
+
+  async _readCreditAccount(ctx, userId) {
+    const obj = await this._getStateAsObject(ctx, this._creditKey(userId));
+    if (obj) return obj;
+    return {
+      docType: "CreditAccount",
+      userId: String(userId),
+      balance: 0,
+      updatedAt: "",
+    };
+  }
+
+  async _writeCreditLedger(ctx, fromUserId, toUserId, amount, reasonCode) {
+    // 流水键用 ctx.stub.getTxID() + 一个递增计数以保证一笔交易内多次落水不冲突
+    const txid = ctx.stub.getTxID();
+    // 用对象长度做次序，避免不同 tx 内并发冲突
+    const ledgerId = `${txid}_${(this._ledgerSeqHint || 0).toString().padStart(4, "0")}`;
+    this._ledgerSeqHint = (this._ledgerSeqHint || 0) + 1;
+    const entry = {
+      docType: "CreditLedger",
+      ledgerId,
+      fromUserId: fromUserId == null ? "" : String(fromUserId),
+      toUserId: String(toUserId),
+      amount: Number(amount),
+      reasonCode: String(reasonCode || ""),
+      txId: txid,
+      createdAt: this._isoFromSeconds(this._txTimestampSeconds(ctx)),
+    };
+    await this._putStateAsObject(ctx, this._creditLedgerKey(ledgerId), entry);
+    return entry;
+  }
+
+  async _creditMint(ctx, toUserId, amount, reasonCode) {
+    // 内部用：业务方法触发的自动 mint。不做权限校验（业务上下文是封闭的）。
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return;
+    const account = await this._readCreditAccount(ctx, toUserId);
+    account.balance = Number(account.balance || 0) + amt;
+    account.updatedAt = this._isoFromSeconds(this._txTimestampSeconds(ctx));
+    await this._putStateAsObject(ctx, this._creditKey(toUserId), account);
+    const ledger = await this._writeCreditLedger(
+      ctx,
+      "",
+      toUserId,
+      amt,
+      reasonCode
+    );
+    ctx.stub.setEvent(
+      "CreditMinted",
+      Buffer.from(JSON.stringify({
+        toUserId: String(toUserId),
+        amount: amt,
+        reasonCode,
+        newBalance: account.balance,
+        ledgerId: ledger.ledgerId,
+      }))
+    );
+  }
+
+  /**
+   * 迭代 13：admin mint（仅 Org1MSP）。
+   */
+  async CreditMint(ctx, toUserId, amount, reasonCode, mintedAt) {
+    if (this._callerMsp(ctx) !== "Org1MSP") {
+      throw new Error("仅 Org1MSP 可执行 CreditMint");
+    }
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      throw new Error("amount 必须为正数");
+    }
+    await this._creditMint(ctx, toUserId, amt, reasonCode || "ADMIN_MINT");
+    const account = await this._readCreditAccount(ctx, toUserId);
+    return JSON.stringify(account);
+  }
+
+  /**
+   * 迭代 13：账户间转账。链上原子扣加；余额不足 / 自转 → 抛错。
+   */
+  async CreditTransfer(ctx, fromUserId, toUserId, amount, reasonCode, txAt) {
+    if (String(fromUserId) === String(toUserId)) {
+      throw new Error("不允许自转");
+    }
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      throw new Error("amount 必须为正数");
+    }
+    const fromAcc = await this._readCreditAccount(ctx, fromUserId);
+    if (Number(fromAcc.balance || 0) < amt) {
+      throw new Error(`余额不足：${fromAcc.balance} < ${amt}`);
+    }
+    const toAcc = await this._readCreditAccount(ctx, toUserId);
+    fromAcc.balance = Number(fromAcc.balance || 0) - amt;
+    toAcc.balance = Number(toAcc.balance || 0) + amt;
+    const nowIso = this._isoFromSeconds(this._txTimestampSeconds(ctx));
+    fromAcc.updatedAt = nowIso;
+    toAcc.updatedAt = nowIso;
+    // 原子：同一 tx 内两次 putState（Fabric endorsement 单一 transaction）
+    await this._putStateAsObject(ctx, this._creditKey(fromUserId), fromAcc);
+    await this._putStateAsObject(ctx, this._creditKey(toUserId), toAcc);
+    const ledger = await this._writeCreditLedger(
+      ctx, fromUserId, toUserId, amt, reasonCode || "TRANSFER"
+    );
+    ctx.stub.setEvent(
+      "CreditTransferred",
+      Buffer.from(JSON.stringify({
+        fromUserId: String(fromUserId),
+        toUserId: String(toUserId),
+        amount: amt,
+        reasonCode,
+        ledgerId: ledger.ledgerId,
+      }))
+    );
+    return JSON.stringify({
+      fromBalance: fromAcc.balance,
+      toBalance: toAcc.balance,
+      ledger,
+    });
+  }
+
+  async CreditBalance(ctx, userId) {
+    const account = await this._readCreditAccount(ctx, userId);
+    return JSON.stringify(account);
+  }
+
+  async CreditHistory(ctx, userId, pageSize, bookmark) {
+    // 富查询：所有 ledger 条目中，fromUserId == userId 或 toUserId == userId
+    const selector = {
+      docType: "CreditLedger",
+      $or: [{ fromUserId: String(userId) }, { toUserId: String(userId) }],
+    };
+    const out = await this._richQueryPaged(
+      ctx,
+      selector,
+      pageSize,
+      bookmark,
+      ["_design/indexCreditLedgerDoc", "indexCreditLedger"],
+      [{ createdAt: "desc" }]
+    );
+    return JSON.stringify(out);
   }
 
   /**
