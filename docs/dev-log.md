@@ -14,6 +14,19 @@
 验证：
 
 - `npm run build` 通过。
+
+修复本机 Docker 启动问题：
+
+- MySQL 宿主机端口从 `3306` 改为 `3307`，避免和本机已有 `mysqld` 冲突；容器内部仍然使用 `mysql:3306`。
+- gateway 显式配置 Org1/Org2 admin 证书路径，匹配 Fabric 实际生成的 `Admin@org*.example.com-cert.pem`。
+- 当前 Windows 项目目录缺少 Fabric runtime，已从 WSL 中同步 `organizations` 到 `fabric-network/runtime/...`，让 gateway 能读取 connection profile 和证书。
+
+验证：
+
+- `docker compose ps` 显示 mysql healthy、gateway healthy、backend/frontend running。
+- `http://localhost:3000/ready` 返回 ready。
+- `http://localhost:8000/health` 返回 ok。
+- `http://localhost:5173` 返回 200。
 - `pytest tests/test_governance.py tests/test_freeze.py tests/test_v2_upgrade.py tests/test_anchor.py tests/test_credits.py -v` 通过。
 - `pytest tests/test_credits.py tests/test_files.py -v` 通过。
 - 链码 `npm test` 通过，85 条。

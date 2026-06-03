@@ -13,7 +13,7 @@ services:
       MYSQL_USER: medshare
       MYSQL_PASSWORD: medshare123
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -59,6 +59,8 @@ services:
       CHAINCODE_NAME: medshare
       FABRIC_DISCOVERY_AS_LOCALHOST: "false"
       FABRIC_ENDPOINT_HOST: host.docker.internal
+      FABRIC_ORG1_CERT: /fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/signcerts/Admin@org1.example.com-cert.pem
+      FABRIC_ORG2_CERT: /fabric-network/runtime/fabric-samples/test-network/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp/signcerts/Admin@org2.example.com-cert.pem
     volumes:
       - ./fabric-network:/fabric-network
     extra_hosts:
