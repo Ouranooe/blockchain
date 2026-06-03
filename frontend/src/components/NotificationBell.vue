@@ -97,6 +97,9 @@ function connect() {
     const item = { ...data, read: false };
     recent.value.unshift(item);
     if (recent.value.length > 50) recent.value = recent.value.slice(0, 50);
+    if (data.event_type === "CreditMinted" || data.event_type === "CreditTransferred") {
+      window.dispatchEvent(new CustomEvent("medshare:credit-refresh"));
+    }
     ElNotification({
       title: prettyTitle(data.event_type),
       message: data.message || data.event_type,
@@ -131,6 +134,14 @@ function prettyTitle(eventType) {
     AccessRevoked: "授权被撤销",
     AccessRecorded: "病历被访问",
     UnauthorizedAttempt: "非法访问尝试",
+    CreditMinted: "积分入账",
+    CreditTransferred: "积分转账",
+    BatchAnchored: "批量锚定",
+    GovernanceProposed: "治理提案",
+    GovernanceApproved: "治理批准",
+    GovernanceExecuted: "治理执行",
+    RecordFrozen: "病历冻结",
+    RecordUnfrozen: "病历解冻",
   };
   return map[eventType] || eventType;
 }

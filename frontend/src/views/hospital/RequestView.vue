@@ -26,6 +26,14 @@
         :rows="5"
         placeholder="请输入访问该医疗数据的理由"
       />
+      <el-select v-model="purpose" style="width: 180px; margin-top: 12px">
+        <el-option
+          v-for="item in purposes"
+          :key="item"
+          :label="purposeLabel(item)"
+          :value="item"
+        />
+      </el-select>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitLoading" @click="submit">提交申请</el-button>
@@ -46,6 +54,8 @@ const records = ref([]);
 const dialogVisible = ref(false);
 const selectedRecord = ref(null);
 const reason = ref("");
+const purpose = ref("TREATMENT");
+const purposes = ref(["TREATMENT"]);
 
 const user = computed(() => JSON.parse(localStorage.getItem("user") || "{}"));
 const candidateRecords = computed(() =>
@@ -68,9 +78,27 @@ async function fetchData() {
   }
 }
 
+async function fetchSystemInfo() {
+  try {
+    const { data } = await http.get("/system/info");
+    purposes.value = data.contract_kinds?.request_purposes || ["TREATMENT"];
+  } catch {
+    purposes.value = ["TREATMENT", "RESEARCH", "AUDIT"];
+  }
+}
+
+function purposeLabel(value) {
+  return {
+    TREATMENT: "治疗",
+    RESEARCH: "科研",
+    AUDIT: "审计",
+  }[value] || value;
+}
+
 function openDialog(row) {
   selectedRecord.value = row;
   reason.value = "";
+  purpose.value = purposes.value[0] || "TREATMENT";
   dialogVisible.value = true;
 }
 
@@ -83,7 +111,8 @@ async function submit() {
   try {
     await http.post("/access-requests", {
       record_id: selectedRecord.value.id,
-      reason: reason.value
+      reason: reason.value,
+      purpose: purpose.value,
     });
     ElMessage.success("申请已提交并上链");
     dialogVisible.value = false;
@@ -94,5 +123,8 @@ async function submit() {
   }
 }
 
-onMounted(fetchData);
+onMounted(() => {
+  fetchData();
+  fetchSystemInfo();
+});
 </script>

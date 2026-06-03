@@ -24,6 +24,17 @@
         <el-input v-model="form.diagnosis" placeholder="例如：轻度贫血" />
       </el-form-item>
 
+      <el-form-item label="病历分类">
+        <el-select v-model="form.category" style="width: 220px">
+          <el-option
+            v-for="item in categories"
+            :key="item"
+            :label="categoryLabel(item)"
+            :value="item"
+          />
+        </el-select>
+      </el-form-item>
+
       <el-form-item label="上传模式">
         <el-radio-group v-model="mode">
           <el-radio value="text">文本</el-radio>
@@ -78,6 +89,7 @@ import http from "../../api/http";
 
 const loading = ref(false);
 const patients = ref([]);
+const categories = ref(["GENERAL"]);
 const mode = ref("text");
 const selectedFile = ref(null);
 const fileInput = ref(null);
@@ -87,6 +99,7 @@ const form = reactive({
   diagnosis: "",
   content: "",
   description: "",
+  category: "GENERAL",
 });
 
 function prettySize(bytes) {
@@ -106,6 +119,27 @@ async function fetchPatients() {
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || "患者列表加载失败");
   }
+}
+
+async function fetchSystemInfo() {
+  try {
+    const { data } = await http.get("/system/info");
+    categories.value = data.contract_kinds?.record_categories || ["GENERAL"];
+    if (!categories.value.includes(form.category)) {
+      form.category = categories.value[0] || "GENERAL";
+    }
+  } catch {
+    categories.value = ["GENERAL", "INPATIENT", "OUTPATIENT", "EMERGENCY"];
+  }
+}
+
+function categoryLabel(value) {
+  return {
+    GENERAL: "通用",
+    INPATIENT: "住院",
+    OUTPATIENT: "门诊",
+    EMERGENCY: "急诊",
+  }[value] || value;
 }
 
 async function submit() {
@@ -128,6 +162,7 @@ async function submit() {
       fd.append("patient_id", form.patient_id);
       fd.append("title", form.title);
       fd.append("diagnosis", form.diagnosis);
+      fd.append("category", form.category);
       fd.append("description", form.description || "");
       fd.append("file", selectedFile.value);
       const { data } = await http.post("/records/upload", fd, {
@@ -144,6 +179,7 @@ async function submit() {
         title: form.title,
         diagnosis: form.diagnosis,
         content: form.content,
+        category: form.category,
       });
       ElMessage.success(`上传成功，TxID: ${data.tx_id || "无"}`);
       form.content = "";
@@ -158,7 +194,10 @@ async function submit() {
   }
 }
 
-onMounted(fetchPatients);
+onMounted(() => {
+  fetchPatients();
+  fetchSystemInfo();
+});
 </script>
 
 <style scoped>

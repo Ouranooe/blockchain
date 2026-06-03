@@ -11,6 +11,17 @@
       <el-table-column prop="title" label="标题" min-width="150" />
       <el-table-column prop="diagnosis" label="诊断" width="130" />
       <el-table-column prop="uploader_hospital" label="上传医院" width="120" />
+      <el-table-column label="分类" width="90">
+        <template #default="{ row }">
+          <el-tag size="small">{{ categoryLabel(row.category) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="冻结" width="90">
+        <template #default="{ row }">
+          <el-tag v-if="row.frozen" size="small" type="danger">已冻结</el-tag>
+          <span v-else class="text-muted">正常</span>
+        </template>
+      </el-table-column>
       <el-table-column label="版本" width="90">
         <template #default="{ row }">
           <el-tag size="small" :type="row.version > 1 ? 'warning' : 'success'">
@@ -36,15 +47,22 @@
           <span v-else class="text-muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="280" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="openHistory(row)">版本链</el-button>
+          <RecordProofButton :record-id="row.id" />
           <el-button
             v-if="row.has_file"
             size="small"
             type="success"
             @click="downloadFile(row)"
           >下载</el-button>
+          <el-button
+            v-if="!row.frozen"
+            size="small"
+            type="danger"
+            @click="freeze(row)"
+          >紧急冻结</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -87,9 +105,10 @@
 
 <script setup>
 import { onMounted, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 
 import http from "../../api/http";
+import RecordProofButton from "../../components/RecordProofButton.vue";
 
 const loading = ref(false);
 const records = ref([]);
@@ -98,6 +117,15 @@ const historyVisible = ref(false);
 const historyLoading = ref(false);
 const chainHistory = ref(null);
 const verifiedIds = ref(new Set());
+
+function categoryLabel(value) {
+  return {
+    GENERAL: "通用",
+    INPATIENT: "住院",
+    OUTPATIENT: "门诊",
+    EMERGENCY: "急诊",
+  }[value] || value || "通用";
+}
 
 async function downloadFile(row) {
   try {
@@ -148,6 +176,29 @@ async function openHistory(row) {
     ElMessage.error(error.response?.data?.detail || "加载链上时间线失败");
   } finally {
     historyLoading.value = false;
+  }
+}
+
+async function freeze(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认紧急冻结病历 #${row.id}？冻结后修订和授权访问都会被链码拒绝。`,
+      "紧急冻结",
+      {
+        confirmButtonText: "冻结并上链",
+        cancelButtonText: "取消",
+        type: "warning",
+      }
+    );
+  } catch {
+    return;
+  }
+  try {
+    await http.post(`/records/${row.id}/freeze`);
+    ElMessage.success("病历已冻结并上链");
+    fetchData();
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || "冻结失败");
   }
 }
 

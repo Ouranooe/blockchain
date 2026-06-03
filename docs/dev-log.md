@@ -1,0 +1,34 @@
+# 开发日志
+
+## 2026-06-03
+
+补齐 9-13 次升级里没有落到前端的入口：
+
+- 全局右上角增加共享积分入口，余额、流水、转账都走 `/api/credits/*`，数据来自链码经 Gateway 返回的结果。
+- 管理员审计页增加批量锚定、治理动作、链码 v2 信息和按分类链上查询入口。
+- 患者病历列表增加紧急冻结按钮，调用 `/api/records/{id}/freeze`。
+- 病历列表增加 Merkle 包含证明查看和链上验证。
+- 上传病历增加 category，访问申请增加 purpose，下拉枚举来自 `/api/system/info`。
+- 文件上传接口补了 category 透传，避免文件病历仍落成默认分类。
+
+验证：
+
+- `npm run build` 通过。
+- `pytest tests/test_governance.py tests/test_freeze.py tests/test_v2_upgrade.py tests/test_anchor.py tests/test_credits.py -v` 通过。
+- `pytest tests/test_credits.py tests/test_files.py -v` 通过。
+- 链码 `npm test` 通过，85 条。
+
+已知问题：
+
+- Playwright 浏览器包下载中断，没完成浏览器截图验证。当前只做到了前端生产构建验证。
+- `npm install` 后 audit 提示 2 个 moderate 漏洞，暂未使用 `npm audit fix --force`，避免破坏依赖版本。
+
+补第 7 次迭代的链上富查询前端入口：
+
+- 医院病历列表增加“链上本院数据”，调用 `/api/records/chain/by-hospital`。
+- 管理员审计页增加“链上检索”页签，支持按医院和按时间范围查链上最新版病历。
+- 患者待审批页增加“链上待审批”，调用 `/api/access-requests/chain/pending`。
+
+验证：
+
+- `npm run build` 通过。

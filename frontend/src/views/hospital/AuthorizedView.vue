@@ -14,6 +14,17 @@
       <el-table-column prop="title" label="标题" min-width="150" />
       <el-table-column prop="patient_name" label="患者" width="100" />
       <el-table-column prop="uploader_hospital" label="上传医院" width="120" />
+      <el-table-column label="分类" width="90">
+        <template #default="{ row }">
+          <el-tag size="small">{{ categoryLabel(row.category) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="冻结" width="90">
+        <template #default="{ row }">
+          <el-tag v-if="row.frozen" size="small" type="danger">已冻结</el-tag>
+          <span v-else class="text-muted">正常</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="diagnosis" label="诊断" width="130" />
       <el-table-column prop="content" label="病历正文" min-width="220" show-overflow-tooltip />
       <el-table-column label="附件" width="110">
@@ -23,8 +34,9 @@
         </template>
       </el-table-column>
       <el-table-column prop="tx_id" label="最新TxID" min-width="180" show-overflow-tooltip />
-      <el-table-column label="操作" width="140" fixed="right">
+      <el-table-column label="操作" width="220" fixed="right">
         <template #default="{ row }">
+          <RecordProofButton :record-id="row.id" />
           <el-button
             v-if="row.has_file"
             size="small"
@@ -42,9 +54,19 @@ import { onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 
 import http from "../../api/http";
+import RecordProofButton from "../../components/RecordProofButton.vue";
 
 const loading = ref(false);
 const records = ref([]);
+
+function categoryLabel(value) {
+  return {
+    GENERAL: "通用",
+    INPATIENT: "住院",
+    OUTPATIENT: "门诊",
+    EMERGENCY: "急诊",
+  }[value] || value || "通用";
+}
 
 async function fetchData() {
   loading.value = true;

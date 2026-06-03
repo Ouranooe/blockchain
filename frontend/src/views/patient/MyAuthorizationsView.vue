@@ -13,6 +13,11 @@
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="record_id" label="记录ID" width="80" />
       <el-table-column prop="applicant_hospital" label="申请医院" width="120" />
+      <el-table-column label="用途" width="90">
+        <template #default="{ row }">
+          <el-tag size="small">{{ purposeLabel(row.purpose) }}</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="reason" label="理由" min-width="180" show-overflow-tooltip />
       <el-table-column label="状态" width="110">
         <template #default="{ row }">
@@ -64,6 +69,14 @@ function statusTagType(status) {
     EXPIRED: "warning",
     EXHAUSTED: "warning",
   }[status] || "";
+}
+
+function purposeLabel(value) {
+  return {
+    TREATMENT: "治疗",
+    RESEARCH: "科研",
+    AUDIT: "审计",
+  }[value] || value || "治疗";
 }
 
 function formatDate(s) {

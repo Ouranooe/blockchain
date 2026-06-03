@@ -19,9 +19,12 @@ if [[ "${CHAINCODE_PATH_RUN}" == *" "* ]]; then
   CHAINCODE_PATH_RUN="${CHAINCODE_LINK}"
 fi
 
+# 国内网络可设 GH_PROXY=https://ghfast.top/ 等加速前缀；默认空（直连）
+GH_PROXY="${GH_PROXY:-}"
+
 if [ ! -d "${SAMPLES_DIR}" ]; then
   echo "[fabric-bootstrap] cloning fabric-samples..."
-  git clone --depth 1 --branch "v${FABRIC_VERSION}" https://github.com/hyperledger/fabric-samples.git "${SAMPLES_DIR}"
+  git clone --depth 1 --branch "v${FABRIC_VERSION}" "${GH_PROXY}https://github.com/hyperledger/fabric-samples.git" "${SAMPLES_DIR}"
 fi
 
 pushd "${SAMPLES_DIR}" >/dev/null
@@ -40,13 +43,13 @@ fi
 
 echo "[fabric-bootstrap] downloading fabric binaries..."
 if [ ! -x "${SAMPLES_DIR}/bin/peer" ]; then
-  curl -L "https://github.com/hyperledger/fabric/releases/download/v${FABRIC_VERSION}/hyperledger-fabric-linux-amd64-${FABRIC_VERSION}.tar.gz" -o /tmp/hyperledger-fabric.tgz
+  curl -L "${GH_PROXY}https://github.com/hyperledger/fabric/releases/download/v${FABRIC_VERSION}/hyperledger-fabric-linux-amd64-${FABRIC_VERSION}.tar.gz" -o /tmp/hyperledger-fabric.tgz
   tar -xzf /tmp/hyperledger-fabric.tgz -C "${SAMPLES_DIR}"
 fi
 
 echo "[fabric-bootstrap] downloading fabric-ca binaries..."
 if [ ! -x "${SAMPLES_DIR}/bin/fabric-ca-client" ]; then
-  curl -L "https://github.com/hyperledger/fabric-ca/releases/download/v${CA_VERSION}/hyperledger-fabric-ca-linux-amd64-${CA_VERSION}.tar.gz" -o /tmp/hyperledger-fabric-ca.tgz
+  curl -L "${GH_PROXY}https://github.com/hyperledger/fabric-ca/releases/download/v${CA_VERSION}/hyperledger-fabric-ca-linux-amd64-${CA_VERSION}.tar.gz" -o /tmp/hyperledger-fabric-ca.tgz
   tar -xzf /tmp/hyperledger-fabric-ca.tgz -C "${SAMPLES_DIR}"
 fi
 

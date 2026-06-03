@@ -4,13 +4,23 @@
       <div class="card-title">待审批访问申请</div>
     </template>
 
-    <el-button type="primary" plain @click="fetchData" :loading="loading">刷新</el-button>
+    <div class="toolbar">
+      <el-button type="primary" plain @click="fetchData" :loading="loading">刷新</el-button>
+      <el-button plain :loading="chainLoading" @click="openChainPending">
+        链上待审批
+      </el-button>
+    </div>
 
     <el-table :data="requests" v-loading="loading" style="margin-top: 16px">
       <el-table-column prop="id" label="申请ID" width="80" />
       <el-table-column prop="record_id" label="记录ID" width="80" />
       <el-table-column prop="record_title" label="记录标题" min-width="160" />
       <el-table-column prop="applicant_hospital" label="申请医院" width="120" />
+      <el-table-column label="用途" width="90">
+        <template #default="{ row }">
+          <el-tag size="small">{{ purposeLabel(row.purpose) }}</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="reason" label="申请理由" min-width="220" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="90" />
       <el-table-column label="操作" width="200">
@@ -46,6 +56,26 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <el-drawer v-model="chainVisible" title="链上 PENDING 申请" size="680px">
+      <p class="muted">
+        数据来自 `/access-requests/chain/pending`，直接查询链上 AccessRequest 状态。
+      </p>
+      <el-table :data="chainRequests" v-loading="chainLoading" size="small">
+        <el-table-column prop="request_id" label="申请ID" width="90" />
+        <el-table-column prop="record_id" label="记录ID" width="90" />
+        <el-table-column prop="patient_id" label="患者ID" width="90" />
+        <el-table-column prop="applicant_hospital" label="申请医院" width="130" />
+        <el-table-column prop="applicant_msp" label="MSP" width="120" />
+        <el-table-column prop="status" label="状态" width="100" />
+        <el-table-column prop="created_at" label="创建时间" width="180" />
+      </el-table>
+      <div v-if="chainBookmark" class="load-more">
+        <el-button size="small" :loading="chainLoading" @click="fetchChainPending(chainBookmark)">
+          加载下一页
+        </el-button>
+      </div>
+    </el-drawer>
   </el-card>
 </template>
 
@@ -61,6 +91,18 @@ const approveVisible = ref(false);
 const submitting = ref(false);
 const current = ref(null);
 const approveForm = reactive({ duration_days: 7, max_reads: 3 });
+const chainVisible = ref(false);
+const chainLoading = ref(false);
+const chainRequests = ref([]);
+const chainBookmark = ref("");
+
+function purposeLabel(value) {
+  return {
+    TREATMENT: "治疗",
+    RESEARCH: "科研",
+    AUDIT: "审计",
+  }[value] || value || "治疗";
+}
 
 async function fetchData() {
   loading.value = true;
@@ -71,6 +113,27 @@ async function fetchData() {
     ElMessage.error(error.response?.data?.detail || "加载失败");
   } finally {
     loading.value = false;
+  }
+}
+
+async function openChainPending() {
+  chainVisible.value = true;
+  await fetchChainPending("");
+}
+
+async function fetchChainPending(bookmark = "") {
+  chainLoading.value = true;
+  try {
+    const { data } = await http.get("/access-requests/chain/pending", {
+      params: { page_size: 20, bookmark },
+    });
+    const rows = data.requests || [];
+    chainRequests.value = bookmark ? chainRequests.value.concat(rows) : rows;
+    chainBookmark.value = data.bookmark || "";
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || "链上待审批加载失败");
+  } finally {
+    chainLoading.value = false;
   }
 }
 
@@ -125,5 +188,13 @@ onMounted(fetchData);
 .muted {
   color: #888;
   font-size: 12px;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+}
+.load-more {
+  text-align: center;
+  margin-top: 10px;
 }
 </style>

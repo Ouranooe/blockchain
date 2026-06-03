@@ -16,6 +16,7 @@
           <span class="role-tag">{{ roleLabel }}</span>
         </div>
         <div class="header-right">
+          <CreditPanel />
           <NotificationBell />
           <el-button type="danger" plain @click="logout">退出登录</el-button>
         </div>
@@ -32,6 +33,7 @@
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
+import CreditPanel from "./CreditPanel.vue";
 import NotificationBell from "./NotificationBell.vue";
 
 const route = useRoute();

@@ -105,6 +105,11 @@ def _record_to_item(record: MedicalRecord, users: Dict[int, User], can_view: boo
         file_name=record.file_name,
         file_mime=record.file_mime,
         file_size=record.file_size,
+        frozen=bool(record.frozen),
+        frozen_at=record.frozen_at,
+        freeze_tx_id=record.freeze_tx_id,
+        unfreeze_tx_id=record.unfreeze_tx_id,
+        category=record.category or "GENERAL",
     )
 
 
@@ -114,6 +119,7 @@ def upload_record_file(
     title: str = Form(..., min_length=1, max_length=255),
     diagnosis: str = Form(..., min_length=1, max_length=255),
     description: str = Form(""),
+    category: str = Form("GENERAL"),
     file: UploadFile = File(...),
     current_user: User = Depends(require_role("hospital")),
     db: Session = Depends(get_db),
@@ -163,6 +169,7 @@ def upload_record_file(
         diagnosis=diagnosis,
         content=description or f"[文件] {file.filename}",
         content_hash=enc.sha256_hex,
+        category=category or "GENERAL",
         version=1,
         previous_tx_id=None,
         file_name=file.filename or "unnamed",
@@ -193,6 +200,7 @@ def upload_record_file(
             patient_id=record.patient_id,
             data_hash=enc.sha256_hex,
             created_at=now_iso,
+            category=category or "GENERAL",
         )
         record.tx_id = chain_result.get("txId")
     except RuntimeError as exc:

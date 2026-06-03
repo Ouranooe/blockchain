@@ -4,13 +4,29 @@
       <div class="card-title">病历数据列表</div>
     </template>
 
-    <el-button type="primary" plain @click="fetchData" :loading="loading">刷新</el-button>
+    <div class="toolbar">
+      <el-button type="primary" plain @click="fetchData" :loading="loading">刷新</el-button>
+      <el-button plain :loading="chainLoading" @click="openChainRecords">
+        链上本院数据
+      </el-button>
+    </div>
 
     <el-table :data="records" v-loading="loading" style="margin-top: 16px">
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="title" label="标题" min-width="150" />
       <el-table-column prop="patient_name" label="患者" width="100" />
       <el-table-column prop="uploader_hospital" label="上传医院" width="120" />
+      <el-table-column label="分类" width="90">
+        <template #default="{ row }">
+          <el-tag size="small">{{ categoryLabel(row.category) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="冻结" width="90">
+        <template #default="{ row }">
+          <el-tag v-if="row.frozen" size="small" type="danger">已冻结</el-tag>
+          <span v-else class="text-muted">正常</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="diagnosis" label="诊断" min-width="160" />
       <el-table-column label="版本" width="90">
         <template #default="{ row }">
@@ -42,9 +58,10 @@
           <span v-else class="text-muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="260" fixed="right">
+      <el-table-column label="操作" width="330" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="openHistory(row)">版本链</el-button>
+          <RecordProofButton :record-id="row.id" />
           <el-button
             v-if="row.has_file && row.can_view_content"
             size="small"
@@ -124,6 +141,25 @@
         </el-timeline>
       </template>
     </el-drawer>
+
+    <el-drawer v-model="chainVisible" title="链上本院最新版病历" size="720px">
+      <p class="muted">
+        数据来自 `/records/chain/by-hospital`，直接查询链上 CouchDB 富查询结果。
+      </p>
+      <el-table :data="chainRecords" v-loading="chainLoading" size="small">
+        <el-table-column prop="record_id" label="记录ID" width="90" />
+        <el-table-column prop="patient_id" label="患者ID" width="90" />
+        <el-table-column prop="uploader_hospital" label="上传医院" width="130" />
+        <el-table-column prop="version" label="版本" width="80" />
+        <el-table-column prop="data_hash" label="链上哈希" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="tx_id" label="TxID" min-width="220" show-overflow-tooltip />
+      </el-table>
+      <div v-if="chainBookmark" class="load-more">
+        <el-button size="small" :loading="chainLoading" @click="fetchChainRecords(chainBookmark)">
+          加载下一页
+        </el-button>
+      </div>
+    </el-drawer>
   </el-card>
 </template>
 
@@ -132,6 +168,7 @@ import { onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 
 import http from "../../api/http";
+import RecordProofButton from "../../components/RecordProofButton.vue";
 
 const loading = ref(false);
 const records = ref([]);
@@ -145,6 +182,10 @@ const reviseForm = reactive({ diagnosis: "", content: "" });
 const historyVisible = ref(false);
 const historyLoading = ref(false);
 const chainHistory = ref(null);
+const chainVisible = ref(false);
+const chainLoading = ref(false);
+const chainRecords = ref([]);
+const chainBookmark = ref("");
 
 const currentUser = (() => {
   try {
@@ -153,6 +194,15 @@ const currentUser = (() => {
     return null;
   }
 })();
+
+function categoryLabel(value) {
+  return {
+    GENERAL: "通用",
+    INPATIENT: "住院",
+    OUTPATIENT: "门诊",
+    EMERGENCY: "急诊",
+  }[value] || value || "通用";
+}
 
 function canRevise(row) {
   return (
@@ -244,6 +294,27 @@ async function openHistory(row) {
   }
 }
 
+async function openChainRecords() {
+  chainVisible.value = true;
+  await fetchChainRecords("");
+}
+
+async function fetchChainRecords(bookmark = "") {
+  chainLoading.value = true;
+  try {
+    const { data } = await http.get("/records/chain/by-hospital", {
+      params: { page_size: 20, bookmark },
+    });
+    const rows = data.records || [];
+    chainRecords.value = bookmark ? chainRecords.value.concat(rows) : rows;
+    chainBookmark.value = data.bookmark || "";
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || "链上本院数据加载失败");
+  } finally {
+    chainLoading.value = false;
+  }
+}
+
 onMounted(fetchData);
 </script>
 
@@ -257,5 +328,13 @@ onMounted(fetchData);
   font-size: 12px;
   word-break: break-all;
   color: #555;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+}
+.load-more {
+  text-align: center;
+  margin-top: 10px;
 }
 </style>
