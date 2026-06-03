@@ -142,7 +142,7 @@ echo "[fabric-bootstrap] stopping old network (if exists)..."
 ./network.sh down || true
 
 echo "[fabric-bootstrap] starting network and channel..."
-./network.sh up createChannel -ca -c "${CHANNEL_NAME}"
+./network.sh up createChannel -ca -c "${CHANNEL_NAME}" -s couchdb
 
 echo "[fabric-bootstrap] deploying chaincode as a service..."
 ./network.sh deployCCAAS -c "${CHANNEL_NAME}" -ccn "${CHAINCODE_NAME}" -ccp "${CHAINCODE_PATH_RUN}"

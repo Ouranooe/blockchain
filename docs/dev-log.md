@@ -27,6 +27,20 @@
 - `http://localhost:3000/ready` 返回 ready。
 - `http://localhost:8000/health` 返回 ok。
 - `http://localhost:5173` 返回 200。
+
+修复链码版本不一致：
+
+- 前端全局积分调用 `/api/credits/balance` 时，gateway 返回 `CreditBalance` 不存在。原因是业务容器连接到旧 Fabric 网络，peer 上部署的 `medshare` chaincode 还不是迭代 13 版本。
+- 将 `fabric-bootstrap` 的 `FABRIC_DOCKER_HOST_ROOT` 改为当前项目路径 `/host_mnt/d/vsCode/python/blockchain`。
+- bootstrap 启动 test-network 时增加 `-s couchdb`，保证第 7 次迭代富查询环境使用 CouchDB。
+- 清理残缺的 `fabric-network/runtime/fabric-samples` 后重新执行 `docker compose --profile fabric-init up --build fabric-bootstrap`，完成当前链码重新部署。
+- 新网络生成的 admin 证书名为 `cert.pem`，移除之前临时写死的 `Admin@org*.example.com-cert.pem` 环境变量。
+
+验证：
+
+- gateway `/ready` 返回 ready。
+- gateway `/api/credits/HospitalA/balance` 返回 200。
+- 后端 `/api/credits/balance` 通过 hospital_a token 返回 `{ user_id: "HospitalA", balance: 0 }`。
 - `pytest tests/test_governance.py tests/test_freeze.py tests/test_v2_upgrade.py tests/test_anchor.py tests/test_credits.py -v` 通过。
 - `pytest tests/test_credits.py tests/test_files.py -v` 通过。
 - 链码 `npm test` 通过，85 条。
