@@ -38,9 +38,20 @@ CREATE TABLE IF NOT EXISTS medical_records (
   file_path VARCHAR(512) NULL,
   file_nonce_b64 VARCHAR(64) NULL,
   file_tag_b64 VARCHAR(64) NULL,
+  anchor_batch_id VARCHAR(64) NULL,
+  anchor_leaf_index INT NULL,
+  frozen TINYINT(1) NOT NULL DEFAULT 0,
+  frozen_at DATETIME NULL,
+  freeze_tx_id VARCHAR(128) NULL,
+  unfreeze_tx_id VARCHAR(128) NULL,
+  unfreeze_gov_tx_id VARCHAR(128) NULL,
+  category VARCHAR(32) NOT NULL DEFAULT 'GENERAL',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_record_patient FOREIGN KEY (patient_id) REFERENCES users(id),
-  CONSTRAINT fk_record_uploader FOREIGN KEY (uploader_hospital_id) REFERENCES users(id)
+  CONSTRAINT fk_record_uploader FOREIGN KEY (uploader_hospital_id) REFERENCES users(id),
+  INDEX idx_records_anchor_batch (anchor_batch_id),
+  INDEX idx_records_frozen (frozen),
+  INDEX idx_records_category (category)
 );
 -- 迭代 2 新增列。若升级旧库请手动执行：
 --   ALTER TABLE medical_records ADD COLUMN version INT NOT NULL DEFAULT 1;
@@ -69,11 +80,13 @@ CREATE TABLE IF NOT EXISTS access_requests (
   max_reads INT NULL,
   revoked_at DATETIME NULL,
   revoke_tx_id VARCHAR(128) NULL,
+  purpose VARCHAR(32) NOT NULL DEFAULT 'TREATMENT',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   reviewed_at DATETIME NULL,
   CONSTRAINT fk_request_record FOREIGN KEY (record_id) REFERENCES medical_records(id),
   CONSTRAINT fk_request_hospital FOREIGN KEY (applicant_hospital_id) REFERENCES users(id),
-  CONSTRAINT fk_request_patient FOREIGN KEY (patient_id) REFERENCES users(id)
+  CONSTRAINT fk_request_patient FOREIGN KEY (patient_id) REFERENCES users(id),
+  INDEX idx_requests_purpose (purpose)
 );
 -- 迭代 5 新增列。若升级旧库请手动执行：
 --   ALTER TABLE access_requests ADD COLUMN expires_at DATETIME NULL;
@@ -99,6 +112,37 @@ CREATE TABLE IF NOT EXISTS audit_events (
   INDEX idx_audit_subject (subject_user_id),
   INDEX idx_audit_actor (actor_id),
   INDEX idx_audit_time (created_at)
+);
+
+CREATE TABLE IF NOT EXISTS governance_actions (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  action_id VARCHAR(64) NOT NULL UNIQUE,
+  kind VARCHAR(32) NOT NULL,
+  payload_json TEXT NOT NULL,
+  proposer_id INT NULL,
+  proposer_msp VARCHAR(32) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'PROPOSED',
+  approvers_json TEXT NOT NULL,
+  propose_tx_id VARCHAR(128) NULL,
+  execute_tx_id VARCHAR(128) NULL,
+  reject_tx_id VARCHAR(128) NULL,
+  proposed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  executed_at DATETIME NULL,
+  rejected_at DATETIME NULL,
+  INDEX idx_gov_kind (kind),
+  INDEX idx_gov_proposer (proposer_id),
+  INDEX idx_gov_status (status)
+);
+
+CREATE TABLE IF NOT EXISTS merkle_anchor_batches (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  batch_id VARCHAR(64) NOT NULL UNIQUE,
+  merkle_root VARCHAR(64) NOT NULL,
+  leaf_count INT NOT NULL,
+  record_id_low INT NULL,
+  record_id_high INT NULL,
+  tx_id VARCHAR(128) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 注：初始种子密码仍为明文 '123456'，首次成功登录时后端会自动替换为 bcrypt 哈希

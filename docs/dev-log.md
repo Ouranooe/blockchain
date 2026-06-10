@@ -2,6 +2,18 @@
 
 ## 2026-06-03
 
+修复前端“加载数据失败”：
+
+- 现象是前端病历列表加载失败，后端 `/api/records` 实际返回 500。
+- 原因不是前端，也不是 Fabric/WSL 部署差异，而是 MySQL 旧数据卷还停留在早期表结构，`medical_records` 缺少 `anchor_batch_id`、`frozen`、`category` 等后续迭代字段，`access_requests` 缺少 `purpose`。
+- 已对运行中的 `medshare` 库做非破坏性 `ALTER TABLE`，保留已有数据。
+- 已同步补齐 `backend/sql/init.sql`，新环境初始化时会直接带上迭代 9、11、12 所需字段，以及 `governance_actions`、`merkle_anchor_batches` 表。
+
+验证：
+- `GET /api/records` 使用 hospital_a token 返回 200。
+- `GET /api/credits/balance` 使用 hospital_a token 返回 200。
+- `pytest backend/tests/test_anchor.py backend/tests/test_freeze.py backend/tests/test_v2_upgrade.py -q` 通过。
+
 补齐 9-13 次升级里没有落到前端的入口：
 
 - 全局右上角增加共享积分入口，余额、流水、转账都走 `/api/credits/*`，数据来自链码经 Gateway 返回的结果。
