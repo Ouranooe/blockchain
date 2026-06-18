@@ -71,3 +71,33 @@
 验证：
 
 - `npm run build` 通过。
+## 2026-06-10
+
+修复本机 Compose 启动失败：
+
+- 现象：Docker Compose 启动时报 `dependency gateway failed to start`，`medshare-gateway` 退出。
+- 实际原因不是 gateway 代码崩溃，而是 Fabric peer 在调用链码时找不到 CCAAS 容器：`peer0org1_medshare_ccaas` / `peer0org2_medshare_ccaas` 不存在。
+- `fabric-bootstrap` 最近一次没有完整跑完，日志里有 Docker Hub DNS 解析失败；peer/orderer 仍在，但链码服务容器丢了。
+- 未重建 Fabric 网络，避免清空链上数据；直接按当前 package id 补启动两个链码服务容器。
+
+关键命令：
+
+```powershell
+docker run --rm -d --name peer0org1_medshare_ccaas --network fabric_test `
+  -e CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999 `
+  -e CHAINCODE_ID=medshare_1.0:2a38d77afcdd1bf8e5ec60967045741a392bd97b0c951d09ea83e32a67f2814f `
+  -e CORE_CHAINCODE_ID_NAME=medshare_1.0:2a38d77afcdd1bf8e5ec60967045741a392bd97b0c951d09ea83e32a67f2814f `
+  medshare_ccaas_image:latest
+
+docker run --rm -d --name peer0org2_medshare_ccaas --network fabric_test `
+  -e CHAINCODE_SERVER_ADDRESS=0.0.0.0:9999 `
+  -e CHAINCODE_ID=medshare_1.0:2a38d77afcdd1bf8e5ec60967045741a392bd97b0c951d09ea83e32a67f2814f `
+  -e CORE_CHAINCODE_ID_NAME=medshare_1.0:2a38d77afcdd1bf8e5ec60967045741a392bd97b0c951d09ea83e32a67f2814f `
+  medshare_ccaas_image:latest
+```
+
+验证：
+
+- `http://127.0.0.1:3000/ready` 返回 ready，Org1/Org2 都 ready。
+- `medshare-gateway` 和 `medshare-mysql` 已 healthy。
+- 已重新启动 `backend` 和 `frontend`。
