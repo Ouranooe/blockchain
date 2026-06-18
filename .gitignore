@@ -30,3 +30,6 @@ build/
 # Runtime/generated files
 fabric-network/runtime/
 *.log
+docs
+doc
+figures

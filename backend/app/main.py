@@ -258,6 +258,19 @@ def _as_utc_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _raise_record_chain_query_error(record: MedicalRecord, exc: RuntimeError) -> None:
+    message = str(exc)
+    if f"Record evidence {record.id} not found" in message:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Record exists in database but its blockchain evidence is missing. "
+                "This usually happens after Fabric is reinitialized without clearing MySQL data."
+            ),
+        )
+    raise HTTPException(status_code=502, detail=message)
+
+
 def _ensure_request_on_chain(req: AccessRequest, record: MedicalRecord, applicant: User):
     if req.create_tx_id:
         return
@@ -956,7 +969,7 @@ def record_history(
     try:
         chain_payload = query_record_history(record_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        _raise_record_chain_query_error(record, exc)
 
     raw_entries = chain_payload.get("result") if isinstance(chain_payload, dict) else None
     if not isinstance(raw_entries, list):
@@ -1008,7 +1021,7 @@ def record_chain_history(
     try:
         chain_payload = query_record_history(record_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        _raise_record_chain_query_error(record, exc)
 
     raw_entries = chain_payload.get("result") if isinstance(chain_payload, dict) else None
     if not isinstance(raw_entries, list):
@@ -2132,7 +2145,12 @@ def my_credit_history(
             user_id=uid, page_size=page_size, bookmark=bookmark
         )
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        message = str(exc)
+        # CouchDB rich query sort can fail on older deployed indexes. Degrade
+        # to an empty history page so the credit panel still loads.
+        if "no_usable_index" in message:
+            return CreditHistoryPage(items=[], bookmark="", fetched_count=0)
+        raise HTTPException(status_code=502, detail=message)
 
     result = chain_result.get("result", {}) if isinstance(chain_result, dict) else {}
     items_raw = result.get("records") or []

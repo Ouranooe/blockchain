@@ -29,7 +29,7 @@ services:
     profiles: ["fabric-init"]
     working_dir: /workspace
     environment:
-      FABRIC_DOCKER_HOST_ROOT: /host_mnt/d/vsCode/python/blockchain
+      FABRIC_DOCKER_HOST_ROOT: /host_mnt/d/Files In Disk D/codeJunior/blockChain/design
     volumes:
       - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock

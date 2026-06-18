@@ -183,6 +183,26 @@ class TestRecordChainHistoryEndpoint:
         )
         assert resp.status_code == 403
 
+    def test_chain_history_returns_409_when_record_missing_on_chain(
+        self, client, make_user, login_token, monkeypatch
+    ):
+        from app import main as main_module
+
+        hosp, _, rec = _seed_record(client, make_user, login_token)
+        rid = rec["id"]
+
+        def _missing(_record_id: int):
+            raise RuntimeError(f"调用 Gateway 失败(404): Record evidence {rid} not found")
+
+        monkeypatch.setattr(main_module, "query_record_history", _missing)
+
+        resp = client.get(
+            f"/api/records/{rid}/chain-history",
+            headers={"Authorization": f"Bearer {hosp}"},
+        )
+        assert resp.status_code == 409
+        assert "blockchain evidence is missing" in resp.json()["detail"]
+
 
 class TestAccessRequestHistory:
     def _seed_access_flow(self, client, make_user, login_token):

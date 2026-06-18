@@ -19,7 +19,7 @@ if [[ "${CHAINCODE_PATH_RUN}" == *" "* ]]; then
   CHAINCODE_PATH_RUN="${CHAINCODE_LINK}"
 fi
 
-# 国内网络可设 GH_PROXY=https://ghfast.top/ 等加速前缀；默认空（直连）
+# Optional GitHub mirror prefix, for example GH_PROXY=https://ghfast.top/
 GH_PROXY="${GH_PROXY:-}"
 
 if [ ! -d "${SAMPLES_DIR}" ]; then
